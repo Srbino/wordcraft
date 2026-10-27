@@ -26,6 +26,24 @@ impl WordApp {
         panes::flush_comment_drafts(self)
     }
 
+    /// Import host-owned bytes synchronously, only when replacing the current document cannot
+    /// discard unsaved work. Unlike UI Open this never queues a Save Changes or picker dialog.
+    /// Success means the native engine has parsed and installed a new document, including when
+    /// the name matches an already opened file.
+    pub fn open_host_document(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.session.dirty || panes::has_comment_drafts(self) || self.save_unconfirmed() {
+            return Err("the current document has unsaved or unconfirmed changes".into());
+        }
+        let before = self.session.document_id();
+        let result = self.execute("file.open", json!({"path":name,"data":wordcraft_engine::cmd::insert::base64_encode(bytes)}))?;
+        if result.get("pending").is_some() || self.session.document_id() == before {
+            return Err("the host document was not opened".into());
+        }
+        // Match a successful ordinary inbox open: show the document instead of File Home.
+        self.ui.backstage = false;
+        Ok(())
+    }
+
     /// Changes to pending comment/reply text, independent of the document's dirty flag.
     pub fn native_draft_revision(&self) -> u64 {
         self.comment_drafts.revision_for(self.session.document_id())

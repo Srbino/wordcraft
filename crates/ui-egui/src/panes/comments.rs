@@ -321,4 +321,24 @@ mod native_snapshot_tests {
         assert_eq!(serde_json::to_value(&app.session.doc).unwrap(), before);
         assert_eq!(comment_draft(&app, id).as_deref(), Some("pending retained"));
     }
+
+    #[test]
+    fn correlated_host_open_refuses_pending_comment_without_flushing_or_replacing_it() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        app.run("review.newComment", json!({"text":"original"})).unwrap();
+        let id = *app.session.doc.comments.keys().next().unwrap();
+        app.session.dirty = false;
+        app.ui.backstage = true;
+        drafts(&mut app).record_edit(id, "pending retained".into());
+        let before = serde_json::to_value(&app.session.doc).unwrap();
+        let document = app.session.document_id();
+        let revision = app.native_draft_revision();
+        let bytes = wordcraft_engine::io::save_bytes("version.json", &wordcraft_doc::Document::new()).unwrap();
+        assert!(app.open_host_document("version.json", &bytes).is_err());
+        assert_eq!(app.session.document_id(), document);
+        assert_eq!(app.native_draft_revision(), revision);
+        assert!(app.ui.backstage);
+        assert_eq!(serde_json::to_value(&app.session.doc).unwrap(), before);
+        assert_eq!(comment_draft(&app, id).as_deref(), Some("pending retained"));
+    }
 }

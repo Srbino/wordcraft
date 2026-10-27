@@ -11,6 +11,11 @@ pub fn native_snapshot(session: &Session) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Native session identity, kept separate from the opaque revision and out of JS numbers.
+pub fn document(session: &Session) -> String {
+    session.document_id().to_string()
+}
+
 /// An opaque token: include document identity, and keep u64 values out of JS numbers.
 pub fn revision(session: &Session, draft_revision: u64) -> String {
     format!("{}:{}:{}", session.document_id(), session.rev(), draft_revision)
@@ -102,5 +107,15 @@ mod tests {
         assert!(observer.changed(&session, 2));
         assert!(!observer.changed(&session, 2));
         assert_ne!(revision(&session, 1), revision(&session, 2));
+    }
+
+    #[test]
+    fn document_identity_is_an_opaque_string_stable_for_edits_and_new_for_replacement() {
+        let mut session = Session::new(wordcraft_doc::Document::new());
+        let original: String = document(&session);
+        session.run("text.insert", &serde_json::json!({"text":"edit"})).unwrap();
+        assert_eq!(document(&session), original);
+        session.set_document(wordcraft_doc::Document::new());
+        assert_ne!(document(&session), original);
     }
 }
