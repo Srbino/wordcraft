@@ -55,7 +55,18 @@
 //! document content and subsequent events use that private port, never a window fallback.
 //! Document identities and revisions are local to this editor instance. Hosts must retire old
 //! ports and callbacks on navigation, never reusing an old ACK for a new iframe instance.
-//! Port mode enables managed saves; native binary frames are nonempty and at most 32 MiB.
+//! Port mode enables managed saves and starts read-only before interaction. Its private ready
+//! has exactly `{type:"wordcraft:ready",version,accessProtocol:1,readOnly:true}`. The authenticated
+//! port accepts `wordcraft:set-access {requestId,readOnly}` with exactly those three keys, a
+//! nonempty ID of at most 128 UTF-8 bytes and a boolean. One request may be pending. The guard
+//! is applied before native input, then `wordcraft:access {requestId,readOnly}` confirms it.
+//! This visit's guard never changes persisted document protection, revisions or saved status.
+//! User New/Open/Save and mutations are refused while locked; the host's correlated import and
+//! native snapshots without pending comment drafts still work, even if the model is dirty.
+//! Existing authored comment drafts are retained and refuse
+//! snapshot export until they can be committed after a valid unlock. Legacy window mode ignores
+//! the access protocol. `?readonly=1` also starts a standalone visit locked.
+//! Native binary frames are nonempty and at most 32 MiB.
 //! Correlated Open also checks this bound before copying JS bytes; legacy ID-less window Open
 //! retains its behavior. In host mode the parent guards leaving the page, and `?author=` names
 //! the user for comments and tracked changes.
@@ -103,6 +114,7 @@ pub struct Bridge {
     window: web_sys::Window,
     parent: web_sys::Window,
     origin: String,
+    access: Rc<RefCell<Option<(String, bool)>>>,
     snapshot: Rc<RefCell<Option<String>>>,
     open: Rc<RefCell<Option<PendingOpen>>>,
     observed: Rc<RefCell<crate::snapshot::RevisionObserver>>,
@@ -136,6 +148,7 @@ impl Bridge {
             window,
             parent,
             origin,
+            access: Rc::default(),
             snapshot: Rc::default(),
             open: Rc::default(),
             observed: Rc::default(),
@@ -165,6 +178,7 @@ impl Bridge {
             window,
             parent,
             origin: parent_origin.into(),
+            access: Rc::default(),
             snapshot: Rc::default(),
             open: Rc::default(),
             observed: Rc::default(),
@@ -235,7 +249,16 @@ impl Bridge {
         if let Some(port) = &self.port {
             port.ready.set(true);
         }
-        self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+        if self.port.is_some() {
+            self.send(&[
+                ("type", "wordcraft:ready".into()),
+                ("version", env!("CARGO_PKG_VERSION").into()),
+                ("accessProtocol", 1.into()),
+                ("readOnly", true.into()),
+            ]);
+        } else {
+            self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+        }
     }
 
     /// The app couldn't start (no WebGPU or WebGL2, for example): let the parent say so.
@@ -266,6 +289,31 @@ impl Bridge {
         let bridge = self.clone();
         let request_ctx = ctx.clone();
         let receive: Rc<dyn Fn(JsValue)> = Rc::new(move |data: JsValue| {
+            if bridge.port.is_some() && string(&data, "type").as_deref() == Some("wordcraft:set-access") {
+                let Some(object) = data.dyn_ref::<js_sys::Object>() else { return };
+                if js_sys::Object::keys(object).length() != 3 {
+                    return;
+                }
+                let Some(id) = bounded_string(&data, "requestId", 128) else { return };
+                let Some(value) = js_sys::Reflect::get(&data, &"readOnly".into()).ok().and_then(|v| v.as_bool()) else { return };
+                let Some(request) =
+                    crate::capability::access_request(&serde_json::json!({"type":"wordcraft:set-access","requestId":id,"readOnly":value}))
+                else {
+                    return;
+                };
+                let mut access = bridge.access.borrow_mut();
+                if access.is_some() {
+                    bridge.send(&[
+                        ("type", "wordcraft:access".into()),
+                        ("requestId", request.0.into()),
+                        ("error", "access request already pending".into()),
+                    ]);
+                    return;
+                }
+                *access = Some(request);
+                request_ctx.request_repaint();
+                return;
+            }
             if bridge.managed {
                 let kind = string(&data, "type");
                 let acknowledgement = match kind.as_deref() {
@@ -451,6 +499,15 @@ impl Bridge {
         // its strict handshake verifier receives the hello.
         if self.window.set_timeout_with_callback_and_timeout_and_arguments_0(callback.as_ref().unchecked_ref(), 0).is_ok() {
             callback.forget();
+        }
+    }
+
+    /// Apply a queued host guard before any native input from this frame. Only then acknowledge
+    /// the request. This does not persist protection, flush drafts, or mark anything saved.
+    pub fn before_logic(&self, app: &mut WordApp) {
+        if let Some((request_id, value)) = self.access.borrow_mut().take() {
+            app.session.set_host_read_only(value);
+            self.send(&[("type", "wordcraft:access".into()), ("requestId", request_id.into()), ("readOnly", app.session.host_read_only().into())]);
         }
     }
 

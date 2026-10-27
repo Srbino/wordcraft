@@ -16,6 +16,20 @@ impl Session {
     /// control channel). Mutating commands are undoable; a failed command leaves the document as
     /// it was; a panic inside a command becomes an error.
     pub fn run(&mut self, id: &str, params: &Value) -> Result<Value, CmdError> {
+        self.run_inner(id, params, false)
+    }
+
+    /// Install host-owned bytes through the existing Open command without unlocking user
+    /// commands. This fixed entry point cannot execute another command on the host's behalf.
+    pub fn open_from_host(&mut self, params: &Value) -> Result<Value, CmdError> {
+        self.run_inner("file.open", params, true)
+    }
+
+    fn run_inner(&mut self, id: &str, params: &Value, host_import: bool) -> Result<Value, CmdError> {
+        // Refuse before consuming undo joins, IME promises or any other session bookkeeping.
+        if !host_import && !self.host_command_allowed(id) {
+            return Err(CmdError::Disabled(super::host_access::HOST_READ_ONLY.into()));
+        }
         // The document the command starts in, and the first id a document it opens can have.
         let home = self.document_id;
         let mark = document_id_mark();

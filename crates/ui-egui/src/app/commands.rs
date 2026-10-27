@@ -24,6 +24,7 @@ impl WordApp {
     /// Close, Envelopes, Labels and Finish & Merge on a document with unsaved changes first ask
     /// Save / Don't Save / Cancel, and the command runs once that is answered (`ui.saveChanges`).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.check_host_access(id)?;
         // Comment text still being typed is written first, so a save or export has it and a
         // close, New or Open counts it as a change (#1348). A draft the document refuses is not
         // part of it: saving and exporting go on without it (the refusal stays on the status
@@ -108,6 +109,40 @@ impl WordApp {
     /// Run a command for a script or an agent (control channel, MCP bridge): never asks first.
     /// UI-level commands (`ui.*`) are handled here, the rest by the engine.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.execute_inner(id, params, false)
+    }
+
+    /// The embedding host's fixed import entry point preserves ordinary Open side effects.
+    pub(super) fn execute_host_import(&mut self, params: Value) -> Result<Value, String> {
+        self.execute_inner("file.open", params, true)
+    }
+
+    pub(crate) fn host_command_allowed(&self, id: &str) -> bool {
+        let view_ui = matches!(
+            id,
+            "ui.tab"
+                | "ui.backstage"
+                | "ui.closeDialog"
+                | "ui.contextMenu"
+                | "ui.paneDock"
+                | "ui.collapseRibbon"
+                | "ui.focusRibbon"
+                | "ui.quickAccessToolbar"
+                | "ui.keytips"
+                | "ui.dark"
+                | "ui.zotero.status"
+        );
+        self.session.host_command_allowed(id) || (self.session.host_read_only() && view_ui)
+    }
+
+    fn check_host_access(&self, id: &str) -> Result<(), String> {
+        if self.host_command_allowed(id) { Ok(()) } else { Err("the host has made this document read-only".into()) }
+    }
+
+    fn execute_inner(&mut self, id: &str, params: Value, host_import: bool) -> Result<Value, String> {
+        if !host_import {
+            self.check_host_access(id)?;
+        }
         // A pending Change Picture only survives until the next action (#147).
         if !matches!(id, "ui.changePicture" | "picture.change" | "insert.picture") {
             self.change_picture_target = None;
@@ -245,7 +280,9 @@ impl WordApp {
         let math_session = self.session.math.as_ref().map(|m| m.session);
         let composing_before = !self.canvas.ime_preedit.is_empty();
         let old_path = self.session.path.clone();
-        let r = if self.ime_origin {
+        let r = if host_import {
+            self.session.open_from_host(&params).map_err(|e| e.to_string())
+        } else if self.ime_origin {
             self.session.run_ime(id, &params).map_err(|e| e.to_string())
         } else {
             self.session.run(id, &params).map_err(|e| e.to_string())

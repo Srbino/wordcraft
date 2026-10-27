@@ -64,6 +64,8 @@ impl Session {
     /// whether a snapshot must cover it.
     pub fn edit_snapshot(&self) -> EditSnapshot {
         let Session {
+            // Host authority belongs to this visit, never to an edit snapshot or undo.
+            host_read_only: _,
             doc,
             sel,
             view: _,
@@ -245,6 +247,9 @@ impl Session {
     /// Why command `id` can't run now, for greying it out: its own `enabled` check, then what
     /// Restrict Editing refuses outright. `None` when it can run (or doesn't exist).
     pub fn why_disabled(&self, id: &str) -> Option<&'static str> {
+        if !self.host_command_allowed(id) {
+            return Some(super::host_access::HOST_READ_ONLY);
+        }
         let spec = self.registry.get(id)?;
         (spec.enabled)(self).or_else(|| if spec.mutates { crate::cmd::protect::greyed_out(self, id, || self.protect_facts()) } else { None })
     }

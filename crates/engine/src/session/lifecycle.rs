@@ -85,6 +85,7 @@ impl Session {
             go_back_step,
         } = DocState::new(doc, 1, ViewState::default());
         Session {
+            host_read_only: false,
             doc,
             sel,
             view,

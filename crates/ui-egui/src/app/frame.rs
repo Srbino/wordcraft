@@ -35,7 +35,7 @@ impl WordApp {
             return Err("the current document has unsaved or unconfirmed changes".into());
         }
         let before = self.session.document_id();
-        let result = self.execute("file.open", json!({"path":name,"data":wordcraft_engine::cmd::insert::base64_encode(bytes)}))?;
+        let result = self.execute_host_import(json!({"path":name,"data":wordcraft_engine::cmd::insert::base64_encode(bytes)}))?;
         if result.get("pending").is_some() || self.session.document_id() == before {
             return Err("the host document was not opened".into());
         }

@@ -376,4 +376,29 @@ mod native_snapshot_tests {
         assert_eq!(comment_draft(&app, id).as_deref(), Some("newer uncommitted comment"));
         assert!(matches!(app.dialog.as_ref(), Some(crate::dialogs::Dialog::SaveChanges { .. })));
     }
+    #[test]
+    fn native_host_readonly_retains_pending_comment_without_save_or_flush() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        app.run("review.newComment", json!({"text":"committed comment"})).unwrap();
+        let id = *app.session.doc.comments.keys().next().unwrap();
+        let part = app.session.doc.comments[&id].part;
+        drafts(&mut app).record_edit(id, "pending local comment".into());
+        app.session.dirty = false;
+        let revision = app.session.rev();
+        let draft_revision = app.native_draft_revision();
+        let bytes = serde_json::to_vec(&app.session.doc).unwrap();
+        app.session.set_host_read_only(true);
+        assert!(app.prepare_native_snapshot().is_err());
+        assert!(app.run("file.save", json!({})).is_err());
+        assert_eq!(comment_draft(&app, id).as_deref(), Some("pending local comment"));
+        assert_eq!(app.session.doc.plain_text(StoryRef::Part(part)), "committed comment");
+        assert_eq!(serde_json::to_vec(&app.session.doc).unwrap(), bytes);
+        assert_eq!(app.session.rev(), revision);
+        assert_eq!(app.native_draft_revision(), draft_revision);
+        assert!(!app.session.dirty);
+        app.session.set_host_read_only(false);
+        app.prepare_native_snapshot().unwrap();
+        assert_eq!(app.session.doc.plain_text(StoryRef::Part(part)), "pending local comment");
+        assert!(app.session.dirty);
+    }
 }

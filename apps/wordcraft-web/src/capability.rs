@@ -34,6 +34,19 @@ pub fn native_js_len_ok(length: f64) -> bool {
     length.is_finite() && length.fract() == 0. && length > 0. && length <= MAX_NATIVE_BYTES as f64
 }
 
+/// A private-port access request is a small control frame, independent of document bytes.
+pub fn access_request(value: &serde_json::Value) -> Option<(String, bool)> {
+    let object = value.as_object()?;
+    if object.len() != 3 || value.get("type")?.as_str()? != "wordcraft:set-access" {
+        return None;
+    }
+    let id = value.get("requestId")?.as_str()?;
+    if id.is_empty() || id.len() > 128 {
+        return None;
+    }
+    Some((id.into(), value.get("readOnly")?.as_bool()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +117,30 @@ mod tests {
         assert!(native_js_len_ok(33_554_432.));
         for length in [0., -1., 0.5, f64::NAN, f64::INFINITY, 33_554_433., 4_294_967_297.] {
             assert!(!native_js_len_ok(length), "{length}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_access_control_requires_exact_keys_bounded_utf8_id_and_boolean() {
+        assert_eq!(access_request(&json!({"type":"wordcraft:set-access","requestId":"revoke","readOnly":true})), Some(("revoke".into(), true)));
+        assert_eq!(access_request(&json!({"type":"wordcraft:set-access","requestId":"allow","readOnly":false})), Some(("allow".into(), false)));
+        for bad in [
+            json!({"type":"wordcraft:set-access","requestId":"","readOnly":true}),
+            json!({"type":"wordcraft:set-access","requestId":"x".repeat(129),"readOnly":true}),
+            json!({"type":"wordcraft:set-access","requestId":"ž".repeat(65),"readOnly":true}),
+            json!({"type":"wordcraft:set-access","requestId":"x","readOnly":"true"}),
+            json!({"type":"wordcraft:set-access","requestId":"x","readOnly":null}),
+            json!({"type":"wordcraft:set-access","requestId":"x","readOnly":true,"extra":true}),
+            json!({"type":"wordcraft:open","requestId":"x","readOnly":true}),
+            json!([]),
+        ] {
+            assert_eq!(access_request(&bad), None, "{bad}");
         }
     }
 }

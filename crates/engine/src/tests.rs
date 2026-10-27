@@ -12,6 +12,7 @@ use crate::{Session, cmd};
 mod bidi;
 mod documents;
 mod fonts;
+mod host_readonly;
 mod ime_noop;
 mod revision_checks;
 mod typing;

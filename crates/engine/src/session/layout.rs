@@ -125,6 +125,9 @@ impl Session {
     /// which is where the caret would be. The document, the selection, the undo history and Repeat
     /// are untouched. `None` when the command fails or isn't allowed here.
     pub fn preview_layout(&mut self, id: &str, params: &Value) -> Option<(Document, Selection, Arc<DocLayout>)> {
+        if !self.host_command_allowed(id) {
+            return None;
+        }
         // The word being typed keeps going without a squiggle on the preview: the command moves
         // the copy's caret off it and may split its paragraph, so it is found again by its place.
         let typing = self.typing_word();

@@ -16,6 +16,7 @@ pub use documents::{DocInfo, DocState};
 use documents::{document_id_mark, next_document_id, untitled_name};
 pub use views::WindowView;
 mod history;
+mod host_access;
 mod ime;
 mod layout;
 mod lifecycle;
@@ -46,6 +47,8 @@ pub use view::{StylesPaneDock, ViewState};
 /// every command works on; the other open documents wait in [`DocState`] values and are swapped
 /// in when they become active (see [`Session::documents`]).
 pub struct Session {
+    /// Ephemeral embedding-host authority, never part of DocState or native serialization.
+    host_read_only: bool,
     pub doc: Document,
     pub sel: Selection,
     pub view: ViewState,

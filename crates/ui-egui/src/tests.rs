@@ -7165,3 +7165,43 @@ fn managed_save_of_a_clean_document_still_guards_replacement_until_its_ticket_fi
     a.settle_async_saves();
     assert!(!a.save_unconfirmed());
 }
+
+#[test]
+fn native_host_readonly_bootstrap_import_keeps_guard_and_blocks_ui_authority() {
+    let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+    app.session.set_host_read_only(true);
+    let bytes = serde_json::to_vec(&wordcraft_doc::Document::from_text("trusted native bootstrap")).unwrap();
+    app.open_host_document("native.json", &bytes).unwrap();
+    assert!(app.session.host_read_only());
+    assert!(!app.ui.backstage);
+    let native = serde_json::to_vec(&app.session.doc).unwrap();
+    let revision = app.session.rev();
+    let document = app.session.document_id();
+    app.prepare_native_snapshot().unwrap();
+    assert_eq!(serde_json::to_vec(&app.session.doc).unwrap(), native);
+    assert_eq!(app.session.rev(), revision);
+    assert_eq!(app.session.document_id(), document);
+    assert!(!app.session.dirty);
+    app.run("select.all", json!({})).unwrap();
+    for id in ["file.new", "format.bold", "ui.changePicture", "ui.zotero.refresh"] {
+        assert!(!crate::widgets::enabled(&app, id), "{id}");
+    }
+    for id in ["view.zoom", "edit.find", "select.all", "edit.copy", "ui.tab"] {
+        assert!(crate::widgets::enabled(&app, id), "{id}");
+    }
+    for id in ["file.new", "file.open", "file.save", "file.close", "ui.zotero.refresh"] {
+        assert!(app.execute(id, json!({})).is_err(), "{id}");
+        assert_eq!(serde_json::to_vec(&app.session.doc).unwrap(), native, "{id}");
+        assert_eq!(app.session.document_id(), document, "{id}");
+    }
+    app.session.set_host_read_only(false);
+    app.run("text.insert", json!({"text":"retained committed dirty native text"})).unwrap();
+    assert!(app.session.dirty);
+    let committed = serde_json::to_vec(&app.session.doc).unwrap();
+    let committed_revision = app.session.rev();
+    app.session.set_host_read_only(true);
+    app.prepare_native_snapshot().unwrap();
+    assert_eq!(serde_json::to_vec(&app.session.doc).unwrap(), committed);
+    assert_eq!(app.session.rev(), committed_revision);
+    assert!(app.session.dirty, "read-only export is not a storage acknowledgement");
+}

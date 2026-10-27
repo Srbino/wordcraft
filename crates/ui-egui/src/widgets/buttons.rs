@@ -20,6 +20,9 @@ pub const LABEL_LINE_H: f32 = 14.0;
 
 /// Whether a command exists and is enabled.
 pub fn enabled(app: &WordApp, id: &str) -> bool {
+    if !app.host_command_allowed(id) {
+        return false;
+    }
     // No document open (#1129): only what opens one, Help and the settings.
     if !app.has_document() && !crate::works_without_document(id) {
         return false;

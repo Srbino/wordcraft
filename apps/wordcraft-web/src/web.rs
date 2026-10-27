@@ -70,6 +70,9 @@ pub fn start() {
                     let sample = app_bridge.is_none() && query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
                     let mut session = Session::new(doc);
+                    // Port instances start locked before the first interactive frame. Only the
+                    // authenticated private capability can grant this visit write access.
+                    session.set_host_read_only(query_param("host").as_deref() == Some("port") || query_param("readonly").as_deref() == Some("1"));
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
@@ -158,6 +161,9 @@ impl eframe::App for WebShell {
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
+        }
+        if let Some(bridge) = &self.bridge {
+            bridge.before_logic(&mut self.app);
         }
         self.app.logic(ctx);
         if let Some(bridge) = &self.bridge {

@@ -180,6 +180,11 @@ pub fn poll(app: &mut WordApp, ctx: &egui::Context) {
             continue;
         }
         app.zotero.methods.push(p.call.method.clone());
+        // A call may already be in flight when the host revokes the writer's access.
+        if app.session.host_read_only() {
+            let _ = p.reply.send(Err("the host has made this document read-only".into()));
+            continue;
+        }
         if app.session.document_id() != app.zotero.document {
             // New or Open replaced the document this command started in: its edits must not land in the new one.
             let _ = p.reply.send(Err("WordCraft replaced the document this command started in".into()));
@@ -376,5 +381,27 @@ mod tests {
         pump(&mut app, &ctx, |a| a.zotero.busy.is_none());
         let last = app.run("ui.zotero.status", json!({})).unwrap()["last"].clone();
         assert!(last["error"].as_str().unwrap().contains("Zotero isn't running"), "{last}");
+    }
+    #[test]
+    fn native_host_readonly_refuses_an_already_queued_zotero_mutation() {
+        let mut app = WordApp::new(Session::new(Document::from_text("retained native text")), Services::default());
+        let (send, calls) = std::sync::mpsc::channel();
+        let (reply, receive) = std::sync::mpsc::channel();
+        app.zotero.calls = Some(calls);
+        app.zotero.busy = Some(wordcraft_zotero::Command::Refresh);
+        app.zotero.document = app.session.document_id();
+        send.send(super::Pending {
+            call: wordcraft_zotero::Call::new("Document_insertField", vec![json!(1), json!("ReferenceMark"), json!(0)]),
+            reply,
+        })
+        .unwrap();
+        let bytes = serde_json::to_vec(&app.session.doc).unwrap();
+        let revision = app.session.rev();
+        app.session.set_host_read_only(true);
+        super::poll(&mut app, &egui::Context::default());
+        assert!(receive.try_recv().unwrap().unwrap_err().contains("read-only"));
+        assert_eq!(serde_json::to_vec(&app.session.doc).unwrap(), bytes);
+        assert_eq!(app.session.rev(), revision);
+        assert!(!app.session.dirty);
     }
 }
