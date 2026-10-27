@@ -19,6 +19,8 @@ mod prefs;
 mod save_fallback;
 
 #[cfg(any(target_arch = "wasm32", test))]
+mod managed;
+#[cfg(any(target_arch = "wasm32", test))]
 mod snapshot;
 
 #[cfg(target_arch = "wasm32")]

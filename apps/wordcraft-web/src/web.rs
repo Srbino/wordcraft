@@ -29,7 +29,11 @@ pub fn start() {
         };
         // `?host=parent`: a same-origin page framing WordCraft opens documents in it and stores
         // what it saves (`host`). That page guards leaving it, so this one doesn't.
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
+        let bridge = if query_param("host").as_deref() == Some("parent") {
+            crate::host::Bridge::new(query_param("save").as_deref() == Some("managed"))
+        } else {
+            None
+        };
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
@@ -157,7 +161,7 @@ impl eframe::App for WebShell {
         }
         self.app.logic(ctx);
         if let Some(bridge) = &self.bridge {
-            bridge.observe(&mut self.app);
+            bridge.observe(&mut self.app, ctx);
         }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {

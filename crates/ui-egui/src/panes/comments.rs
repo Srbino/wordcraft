@@ -341,4 +341,39 @@ mod native_snapshot_tests {
         assert_eq!(serde_json::to_value(&app.session.doc).unwrap(), before);
         assert_eq!(comment_draft(&app, id).as_deref(), Some("pending retained"));
     }
+    #[test]
+    fn stale_manual_ack_never_closes_a_new_comment_draft_after_an_earlier_auto_ack() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        app.run("review.newComment", json!({"text":"original native comment"})).unwrap();
+        let id = *app.session.doc.comments.keys().next().unwrap();
+        let document = app.session.document_id();
+        let saves = crate::async_saves::AsyncSaves::default();
+        let hook = saves.clone();
+        let ticket = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = ticket.clone();
+        app.services.download = Some(Box::new(|_, _| Err("native managed save never downloads".into())));
+        app.services.async_saves = Some(saves.clone());
+        app.services.host_save_request = Some(Box::new(move |_, _| {
+            let id = hook.start();
+            seen.set(id);
+            Ok(id)
+        }));
+        app.run("file.close", json!({})).unwrap();
+        app.run("ui.saveChanges", json!({"answer":"save"})).unwrap();
+        assert_ne!(ticket.get(), 0);
+        // A separate, exact current auto-snapshot ACK arrived first. It legitimately clears
+        // Session.dirty; the original manual ticket is still waiting for its durable reply.
+        app.session.dirty = false;
+        drafts(&mut app).record_edit(id, "newer uncommitted comment".into());
+        let draft_revision = app.native_draft_revision();
+        // The bridge knows the old manual snapshot/ticket but its current draft token differs:
+        // settle that ticket as Saved without flushing or clearing the newer draft.
+        saves.finish(ticket.get(), crate::async_saves::SaveOutcome::Saved);
+        app.settle_async_saves();
+        assert!(app.has_document(), "Close must wait for the newer pending comment");
+        assert_eq!(app.session.document_id(), document);
+        assert_eq!(app.native_draft_revision(), draft_revision);
+        assert_eq!(comment_draft(&app, id).as_deref(), Some("newer uncommitted comment"));
+        assert!(matches!(app.dialog.as_ref(), Some(crate::dialogs::Dialog::SaveChanges { .. })));
+    }
 }
