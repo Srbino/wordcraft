@@ -29,10 +29,10 @@ pub fn start() {
         };
         // `?host=parent`: a same-origin page framing WordCraft opens documents in it and stores
         // what it saves (`host`). That page guards leaving it, so this one doesn't.
-        let bridge = if query_param("host").as_deref() == Some("parent") {
-            crate::host::Bridge::new(query_param("save").as_deref() == Some("managed"))
-        } else {
-            None
+        let bridge = match query_param("host").as_deref() {
+            Some("parent") => crate::host::Bridge::new(query_param("save").as_deref() == Some("managed")),
+            Some("port") => query_param("parent_origin").and_then(|origin| crate::host::Bridge::new_port(&origin)),
+            _ => None,
         };
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
