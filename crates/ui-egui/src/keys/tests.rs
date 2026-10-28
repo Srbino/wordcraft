@@ -1257,3 +1257,35 @@ fn native_managed_paste_waits_for_a_later_user_event_and_keeps_readonly_authorit
     mods_frame(&ctx, &mut a, ctrl, vec![key_event(Key::V, true, ctrl), egui::Event::Paste("forbidden".into()), key_event(Key::V, false, ctrl)]);
     assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
 }
+
+#[test]
+fn text_modifiers_follow_event_order_and_prior_frame_state() {
+    let (ctx, mut a) = alt_frame_app();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("before".into()), egui::Event::ModifiersChanged(ctrl)]);
+    assert_eq!(body(&a), "before", "a later Ctrl cannot swallow earlier text");
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("echo".into())]);
+    assert_eq!(body(&a), "before", "Ctrl held from the preceding frame suppresses command echo");
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(Modifiers::NONE), egui::Event::Text(" released".into())]);
+    assert_eq!(body(&a), "before released");
+    let altgr = Modifiers { ctrl: true, command: true, alt: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(altgr), egui::Event::Text("ą".into())]);
+    if !cfg!(target_os = "macos") {
+        assert_eq!(body(&a), "before releasedą", "AltGr remains text input");
+    }
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(ctrl)]);
+    alt_frame(&ctx, &mut a, vec![egui::Event::WindowFocused(false)]);
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text(" focus".into())]);
+    assert!(body(&a).ends_with(" focus"), "focus loss clears held modifiers");
+}
+
+#[test]
+fn equation_text_before_a_later_control_key_is_not_a_command_echo() {
+    let (ctx, mut a) = alt_frame_app();
+    a.run("insert.equation", json!({"linear":"x"})).unwrap();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("+y".into()), egui::Event::ModifiersChanged(ctrl)]);
+    assert_eq!(a.run("equation.get", json!({})).unwrap()["linear"], "x+y");
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("echo".into())]);
+    assert_eq!(a.run("equation.get", json!({})).unwrap()["linear"], "x+y");
+}

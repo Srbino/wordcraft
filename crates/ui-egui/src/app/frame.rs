@@ -141,6 +141,9 @@ impl WordApp {
             }
             self.sent_title = title;
         }
+        // Also observe frames where a dialog or chrome owns the keyboard, so refocusing
+        // the canvas starts with the actual previously held modifiers. This runs after input.
+        self.canvas.text_modifiers = ctx.input(|i| i.modifiers);
         self.sync_full_screen(ctx);
         self.frame_ms = now_ms() - t0;
         // Typing and formatting land here, after `logic` has reported.

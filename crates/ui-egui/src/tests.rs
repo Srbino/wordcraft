@@ -7561,3 +7561,129 @@ fn native_managed_customization_omits_unavailable_commands_and_respects_readonly
         }
     }
 }
+
+#[test]
+fn native_managed_same_frame_typing_before_control_s_reaches_the_saved_snapshot() {
+    same_frame_typing_save(false, false, false);
+}
+
+#[test]
+fn native_managed_same_frame_split_typing_before_control_s_reaches_the_saved_snapshot() {
+    same_frame_typing_save(true, false, false);
+}
+
+#[test]
+fn native_managed_same_frame_home_selection_text_save_preserves_order() {
+    same_frame_typing_save(false, true, false);
+}
+
+#[test]
+fn native_managed_same_frame_readonly_refuses_text_and_save() {
+    same_frame_typing_save(true, false, true);
+}
+
+fn same_frame_typing_save(split: bool, replace: bool, read_only: bool) {
+    use egui_kittest::kittest::Queryable;
+    let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<u8>>::new()));
+    let captured = saved.clone();
+    let saves = async_saves::AsyncSaves::default();
+    let tickets = saves.clone();
+    let services = Services {
+        host_document_fixed: true,
+        async_saves: Some(saves),
+        host_save_request: Some(Box::new(move |session, _| {
+            let bytes = wordcraft_engine::io::save_bytes("captured.json", &session.doc)?;
+            captured.borrow_mut().push(bytes);
+            Ok(tickets.start())
+        })),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    a.session.path = Some(std::path::PathBuf::from("native-version.json"));
+    let mut h = harness(a);
+    h.run_steps(6);
+    h.get_by_role(egui::accesskit::Role::Document).click();
+    h.run_steps(3);
+    h.input_mut().events = vec![egui::Event::ModifiersChanged(egui::Modifiers::default()), egui::Event::Text("P".into())];
+    h.step();
+    assert_eq!(body_text(h.state()), "P", "the active canvas accepted the first frame");
+    let control = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.state_mut().session.set_host_read_only(read_only);
+    // No redundant initial ModifiersChanged: the preceding frame ended without Ctrl.
+    let mut events = Vec::new();
+    if replace {
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        for (key, modifiers) in [(egui::Key::Home, control), (egui::Key::End, shift)] {
+            events.push(egui::Event::ModifiersChanged(modifiers));
+            events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        }
+        events.push(egui::Event::ModifiersChanged(egui::Modifiers::default()));
+    }
+    if split {
+        for ch in "avelMarker ".chars() {
+            events.push(egui::Event::Text(ch.to_string()));
+        }
+    } else {
+        events.push(egui::Event::Text("avelMarker ".into()));
+    }
+    events.push(egui::Event::ModifiersChanged(control));
+    events.push(egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: control });
+    // Harness::event/step processes each queued event in its own frame. RawInput is
+    // intentional here: all text and the later shortcut must share exactly ONE frame.
+    h.input_mut().events = events;
+    h.step();
+    if read_only {
+        assert_eq!(body_text(h.state()), "P");
+        assert!(saved.borrow().is_empty(), "read-only did not request a save");
+        return;
+    }
+    let expected = if replace { "avelMarker " } else { "PavelMarker " };
+    assert_eq!(body_text(h.state()), expected);
+    assert!(h.state().session.dirty, "a save intent is not a server ACK");
+    assert!(!saved.borrow().is_empty(), "real managed save callback ran (body={:?})", body_text(h.state()));
+    for bytes in saved.borrow().iter() {
+        let native: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(native["body"][0]["text"], expected, "same-frame managed save must include all prior text (split={split})");
+    }
+}
+
+#[test]
+fn native_canvas_refocus_uses_modifiers_observed_while_file_chrome_owned_the_frame() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default()));
+    h.run_steps(6);
+    h.get_by_role(egui::accesskit::Role::Document).click();
+    h.run_steps(3);
+    h.input_mut().events = vec![egui::Event::Text("P".into())];
+    h.step();
+    let control = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.state_mut().ui.backstage = true;
+    h.input_mut().events = vec![egui::Event::ModifiersChanged(control)];
+    h.step();
+    assert!(h.state().canvas.text_modifiers.ctrl, "File chrome observed held Ctrl without a canvas");
+    h.state_mut().ui.backstage = false;
+    h.input_mut().events.clear();
+    h.step();
+    // Node::click_modifiers releases modifiers after clicking. Send coherent pointer
+    // frames directly so Ctrl really remains held when the following Text arrives.
+    let pos = h.get_by_role(egui::accesskit::Role::Document).rect().center();
+    for pressed in [true, false] {
+        h.input_mut().events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: control },
+        ];
+        h.step();
+    }
+    assert!(h.state().canvas.focused, "real Document click restored focus");
+    h.input_mut().events = vec![egui::Event::Text("shortcut echo".into())];
+    h.step();
+    assert_eq!(body_text(h.state()), "P", "Ctrl held while canvas was absent still suppresses command echo");
+    // Ctrl-click can select the paragraph. Release Ctrl and collapse at End before typing.
+    h.input_mut().events = vec![
+        egui::Event::ModifiersChanged(egui::Modifiers::default()),
+        egui::Event::Key { key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() },
+        egui::Event::Text(" released".into()),
+    ];
+    h.step();
+    assert_eq!(body_text(h.state()), "P released");
+}
