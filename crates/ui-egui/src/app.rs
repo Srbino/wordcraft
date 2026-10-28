@@ -399,6 +399,7 @@ impl WordApp {
         let moved = |app: &WordApp| app.windows.shown() != window;
         let t0 = now_ms();
         let ctx = ui.ctx().clone();
+        crate::widgets::set_managed_document_context(&ctx, self.managed_document());
         i18n::set_current(i18n::Lang::from_pref(&self.ui.language));
         // Animation effects off: egui's scroll areas get a wheel notch whole, not eased in.
         if !self.animations_on() {

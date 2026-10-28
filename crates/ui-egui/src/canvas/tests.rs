@@ -2639,34 +2639,38 @@ fn only_web_and_email_links_are_followed() {
 /// only Go To selects the bookmark's text (#1236).
 #[test]
 fn a_link_to_a_bookmark_puts_the_caret_at_its_start() {
-    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Alpha beta gamma\nSee here")), Default::default());
-    a.run("select.text", json!({"text": "beta"})).unwrap();
-    a.run("insert.bookmark", json!({"name": "Spot"})).unwrap();
-    a.run("select.text", json!({"text": "here"})).unwrap();
-    a.run("insert.link", json!({"url": "#Spot"})).unwrap();
-    a.run("caret.docEnd", json!({})).unwrap();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
-        |ui, app: &mut WordApp| {
-            let ctx = ui.ctx().clone();
-            app.logic(&ctx);
-            app.ui(ui);
-        },
-        a,
-    );
-    steps(&mut h, 6);
-    // Between the link's "h" and "e".
-    let c = h.state_mut().session.layout().caret(&Pos { story: StoryRef::Body, path: wordcraft_doc::Path::top(1), off: 5 }).unwrap();
-    let at = screen(&mut h, c.x, c.top + c.height / 2.0);
-    h.event(egui::Event::PointerMoved(at));
-    h.step();
-    let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::COMMAND };
-    h.event_modifiers(press, egui::Modifiers::COMMAND);
-    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-    steps(&mut h, 3);
-    let s = &h.state().session;
-    let (start, _) = wordcraft_engine::cmd::insert::bookmark_range(&s.doc, "Spot").unwrap();
-    assert!(s.sel.is_collapsed(), "a caret, not a selection: {:?}", s.sel);
-    assert_eq!(s.sel.focus, start, "at the bookmark's start");
+    for fixed in [false, true] {
+        let mut a =
+            WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Alpha beta gamma\nSee here")), Default::default());
+        a.services.host_document_fixed = fixed;
+        a.run("select.text", json!({"text": "beta"})).unwrap();
+        a.run("insert.bookmark", json!({"name": "Spot"})).unwrap();
+        a.run("select.text", json!({"text": "here"})).unwrap();
+        a.run("insert.link", json!({"url": "#Spot"})).unwrap();
+        a.run("caret.docEnd", json!({})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        steps(&mut h, 6);
+        // Between the link's "h" and "e".
+        let c = h.state_mut().session.layout().caret(&Pos { story: StoryRef::Body, path: wordcraft_doc::Path::top(1), off: 5 }).unwrap();
+        let at = screen(&mut h, c.x, c.top + c.height / 2.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::COMMAND };
+        h.event_modifiers(press, egui::Modifiers::COMMAND);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        steps(&mut h, 3);
+        let s = &h.state().session;
+        let (start, _) = wordcraft_engine::cmd::insert::bookmark_range(&s.doc, "Spot").unwrap();
+        assert!(s.sel.is_collapsed(), "a caret, not a selection: {:?}", s.sel);
+        assert_eq!(s.sel.focus, start, "at the bookmark's start");
+    }
 }
 
 /// #2945: only a `REF` or `PAGEREF` with `\h` and a bookmark makes a link.
@@ -4797,4 +4801,33 @@ fn the_view_key_changes_when_a_drag_takes_an_object_off_the_page() {
     let hidden = view_key(&app, false, Some(&object));
     assert_ne!(hidden, view_key(&app, false, None), "the page without the dragged object is rendered again");
     assert_eq!(hidden, view_key(&app, false, Some(&object)), "the same drag keeps the key: no re-render every frame");
+}
+
+#[test]
+fn native_managed_external_document_links_keep_data_without_navigation_affordances() {
+    use egui_kittest::kittest::Queryable;
+    for fixed in [false, true] {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("See here")), Default::default());
+        a.services.host_document_fixed = fixed;
+        a.run("select.text", json!({"text":"here"})).unwrap();
+        a.run("insert.link", json!({"url":"https://example.com/"})).unwrap();
+        let before = serde_json::to_value(&a.session.doc).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, a: &mut WordApp| {
+                a.logic(ui.ctx());
+                a.ui(ui);
+            },
+            a,
+        );
+        steps(&mut h, 6);
+        let c = h.state_mut().session.layout().caret(&Pos { story: StoryRef::Body, path: wordcraft_doc::Path::top(0), off: 5 }).unwrap();
+        let at = screen(&mut h, c.x, c.top + c.height / 2.0);
+        h.event(egui::Event::PointerMoved(at));
+        steps(&mut h, 2);
+        assert_eq!(h.query_all_by_label_contains("Click to follow link").count() > 0, !fixed);
+        h.state_mut().canvas.open_url = Some("https://example.com/".into());
+        h.step();
+        assert_eq!(h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::OpenUrl(_))), !fixed);
+        assert_eq!(serde_json::to_value(&h.state().session.doc).unwrap(), before);
+    }
 }

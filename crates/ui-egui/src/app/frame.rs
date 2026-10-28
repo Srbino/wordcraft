@@ -124,7 +124,9 @@ impl WordApp {
             return;
         }
         self.refocus_after_chrome_click(ctx);
-        if let Some(url) = self.canvas.open_url.take() {
+        if let Some(url) = self.canvas.open_url.take()
+            && !self.managed_document()
+        {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
     }

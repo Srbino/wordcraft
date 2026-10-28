@@ -7423,3 +7423,72 @@ fn native_managed_markdown_exports_hide_unbundled_media_but_keep_text_only_copie
         assert!(h.query_by_label("Word document (*.docx)").is_some());
     }
 }
+
+#[test]
+fn native_managed_profile_hides_registered_research_and_default_template_stubs() {
+    fn painted_text(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| painted_text(shape, out)),
+            _ => {}
+        }
+    }
+    for fixed in [false, true] {
+        for (tab, id, label) in [("References", "references.researcher", "Researcher"), ("Design", "design.setDefault", "Set as Default")] {
+            let (mut a, _, _) = fixed_managed_host_app();
+            a.services.host_document_fixed = fixed;
+            assert_eq!(a.host_command_visible(id), !fixed, "{id}");
+            let before = serde_json::to_value(&a.session.doc).unwrap();
+            assert_eq!(a.run(id, json!({})).is_err(), fixed, "{id}");
+            assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+            a.ui.tab = tab.into();
+            let mut h = harness(a);
+            h.run_steps(5);
+            let mut texts = vec![];
+            for shape in &h.output().shapes {
+                painted_text(&shape.shape, &mut texts);
+            }
+            assert_eq!(texts.iter().any(|text| text == label), !fixed, "{tab}: {label}");
+        }
+    }
+}
+
+#[test]
+fn native_managed_profile_refuses_unpersisted_font_files_and_local_font_queries() {
+    for fixed in [false, true] {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = calls.clone();
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.services.load_system_fonts = Some(Box::new(move || counter.set(counter.get() + 1)));
+        assert_eq!(a.host_command_visible("font.loadSystem"), !fixed);
+        assert_eq!(a.host_command_visible("font.add"), !fixed, "custom font bytes are absent from native snapshots");
+        assert_eq!(a.host_command_visible("font.remove"), !fixed);
+        assert_eq!(a.run("font.loadSystem", json!({})).is_err(), fixed);
+        assert_eq!(calls.get(), usize::from(!fixed));
+        a.ui.tab = "Home".into();
+        let mut h = harness(a);
+        h.run_steps(5);
+        assert_eq!(crate::widgets::managed_document_context(&h.ctx), fixed);
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Font options").click();
+        h.run_steps(3);
+        assert_eq!(h.query_by_label("Add Font…").is_some(), !fixed);
+    }
+}
+
+#[test]
+fn native_managed_external_about_references_are_readable_without_navigation_actions() {
+    use egui_kittest::kittest::Queryable;
+    for fixed in [false, true] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.run("ui.dialog", json!({"name":"about"})).unwrap();
+        let mut h = harness(a);
+        h.run_steps(6);
+        assert_eq!(h.query_all_by_role(egui::accesskit::Role::Link).count(), if fixed { 0 } else { 3 });
+        assert!(h.query_by_label("Source code: github.com/storytold/wordcraft").is_some());
+        assert!(h.query_by_label("Contributors").is_some());
+        assert!(h.query_by_label("Models").is_some());
+    }
+}

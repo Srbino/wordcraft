@@ -33,6 +33,21 @@ use tooltip::show_hint;
 #[cfg(test)]
 pub(crate) use tooltip::tooltip_lines;
 pub use tooltip::{key_text, shortcut_text};
+/// Rendering-only capability context for widgets that do not receive `WordApp`.
+/// Command authority still comes from the app and engine, never egui memory.
+pub(crate) fn set_managed_document_context(ctx: &egui::Context, fixed: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("wc_host_fixed_document"), fixed));
+}
+
+pub(crate) fn managed_document_context(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("wc_host_fixed_document"))).unwrap_or(false)
+}
+
+/// Credits/source references stay readable in a fixed opaque host without navigating its frame.
+pub(crate) fn external_reference(ui: &mut Ui, label: impl Into<egui::WidgetText>, url: impl ToString) -> Response {
+    if managed_document_context(ui.ctx()) { ui.label(label) } else { ui.hyperlink_to(label, url) }
+}
+
 // #653: a two-line label ends inside the content, above the group title row.
 const _: () = assert!(BIG_LABEL_Y + LABEL_PITCH + LABEL_LINE_H <= CONTENT_H);
 const _: () = assert!(BIG_ICON_Y + 16.0 <= BIG_LABEL_Y);
