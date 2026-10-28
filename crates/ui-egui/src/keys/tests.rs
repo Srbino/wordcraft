@@ -1220,3 +1220,72 @@ fn typing_with_smart_art_selected_types_into_an_item() {
     let g = wordcraft_engine::cmd::smart_art::selected_smart_art(&a.session).expect("still there");
     assert_eq!(g.items[0].text, "Ada", "one undo step for the typing");
 }
+
+fn native_managed_paste_app() -> WordApp {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("stale internal copy")), crate::Services::default());
+    a.services.host_document_fixed = true;
+    a.run("select.all", json!({})).unwrap();
+    a.run("edit.copy", json!({})).unwrap();
+    a.run("document.setText", json!({"text":""})).unwrap();
+    a
+}
+
+#[test]
+fn native_managed_paste_does_not_insert_internal_copy_before_same_frame_user_event() {
+    let mut a = native_managed_paste_app();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    mods_frame(
+        &egui::Context::default(),
+        &mut a,
+        ctrl,
+        vec![key_event(Key::V, true, ctrl), egui::Event::Paste("external user paste".into()), key_event(Key::V, false, ctrl)],
+    );
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "external user paste");
+}
+
+#[test]
+fn native_managed_paste_waits_for_a_later_user_event_and_keeps_readonly_authority() {
+    let mut a = native_managed_paste_app();
+    let ctx = egui::Context::default();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    mods_frame(&ctx, &mut a, ctrl, vec![key_event(Key::V, true, ctrl)]);
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "", "the raw shortcut must not paste the stale internal copy");
+    mods_frame(&ctx, &mut a, ctrl, vec![egui::Event::Paste("external user paste".into()), key_event(Key::V, false, ctrl)]);
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "external user paste");
+    a.session.set_host_read_only(true);
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    mods_frame(&ctx, &mut a, ctrl, vec![key_event(Key::V, true, ctrl), egui::Event::Paste("forbidden".into()), key_event(Key::V, false, ctrl)]);
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+}
+
+#[test]
+fn text_modifiers_follow_event_order_and_prior_frame_state() {
+    let (ctx, mut a) = alt_frame_app();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("before".into()), egui::Event::ModifiersChanged(ctrl)]);
+    assert_eq!(body(&a), "before", "a later Ctrl cannot swallow earlier text");
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("echo".into())]);
+    assert_eq!(body(&a), "before", "Ctrl held from the preceding frame suppresses command echo");
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(Modifiers::NONE), egui::Event::Text(" released".into())]);
+    assert_eq!(body(&a), "before released");
+    let altgr = Modifiers { ctrl: true, command: true, alt: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(altgr), egui::Event::Text("ą".into())]);
+    if !cfg!(target_os = "macos") {
+        assert_eq!(body(&a), "before releasedą", "AltGr remains text input");
+    }
+    alt_frame(&ctx, &mut a, vec![egui::Event::ModifiersChanged(ctrl)]);
+    alt_frame(&ctx, &mut a, vec![egui::Event::WindowFocused(false)]);
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text(" focus".into())]);
+    assert!(body(&a).ends_with(" focus"), "focus loss clears held modifiers");
+}
+
+#[test]
+fn equation_text_before_a_later_control_key_is_not_a_command_echo() {
+    let (ctx, mut a) = alt_frame_app();
+    a.run("insert.equation", json!({"linear":"x"})).unwrap();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("+y".into()), egui::Event::ModifiersChanged(ctrl)]);
+    assert_eq!(a.run("equation.get", json!({})).unwrap()["linear"], "x+y");
+    alt_frame(&ctx, &mut a, vec![egui::Event::Text("echo".into())]);
+    assert_eq!(a.run("equation.get", json!({})).unwrap()["linear"], "x+y");
+}

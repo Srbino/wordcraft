@@ -197,6 +197,12 @@ impl Bridge {
         // The browser's save picker is never used, so no save finishes later.
         services.async_saves = None;
         if self.managed {
+            services.host_document_fixed = self.port.is_some();
+            // An opaque capability frame cannot call the nested PDF viewer's print(). The
+            // existing PDF-copy controls remain available through the host export hook.
+            if self.port.is_some() {
+                services.print = None;
+            }
             services.async_saves = Some(self.saves.clone());
             let bridge = self.clone();
             services.host_save_request = Some(Box::new(move |session, draft_revision| {

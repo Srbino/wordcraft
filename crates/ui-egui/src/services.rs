@@ -4,6 +4,10 @@ use super::*;
 /// Platform services injected by the host (file dialogs, file I/O).
 #[derive(Default)]
 pub struct Services {
+    /// Opt-in single-document capability host. The parent owns document lifecycle and exports;
+    /// unrelated document windows, desktop-only services and placeholder actions stay hidden.
+    /// False by default, including legacy same-origin managed-save hosts.
+    pub host_document_fixed: bool,
     /// Desktop: discover configured printers on a worker.
     pub printers: Option<printing::Discover>,
     /// Desktop: submit the PDF with the chosen settings on a worker.

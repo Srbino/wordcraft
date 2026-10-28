@@ -190,6 +190,9 @@ fn tree_rows(app: &WordApp) -> Vec<Row> {
             let item = TreeItem { tab: t.name.clone(), group: Some(g.name.clone()), command: None };
             rows.push(Row { item, depth: 1, text: format!("{} {custom}", g.name), shown: None });
             for id in &g.commands {
+                if !app.host_command_visible(id) {
+                    continue;
+                }
                 let item = TreeItem { tab: t.name.clone(), group: Some(g.name.clone()), command: Some(id.clone()) };
                 rows.push(Row { item, depth: 2, text: label_of(app, id), shown: None });
             }
@@ -350,7 +353,7 @@ fn tree_rows_ui(app: &mut WordApp, ui: &mut Ui, f: &mut RibbonForm, rows: &[Row]
 }
 
 fn qat_page(app: &mut WordApp, ui: &mut Ui, f: &mut RibbonForm, h: f32) {
-    let ids: Vec<String> = app.session.ribbon.qat().into_iter().map(str::to_string).collect();
+    let ids: Vec<String> = crate::chrome::visible_qat(app).into_iter().map(str::to_string).collect();
     if !ids.contains(&f.qat_selected) {
         f.qat_selected = ids.first().cloned().unwrap_or_default();
     }
@@ -377,8 +380,11 @@ fn qat_page(app: &mut WordApp, ui: &mut Ui, f: &mut RibbonForm, h: f32) {
             ui.vertical(|ui| {
                 ui.add_space(h / 2.0 - 10.0);
                 for (text, by) in [("Up", -1), ("Down", 1)] {
-                    if ui.add_enabled(!f.qat_selected.is_empty(), egui::Button::new(tl!(text)).min_size(vec2(56.0, 0.0))).clicked() {
-                        change(app, f, json!({"qatMove": {"command": f.qat_selected, "by": by}}));
+                    let delta = crate::chrome::qat_move_delta(app, &f.qat_selected, by);
+                    if ui.add_enabled(delta.is_some(), egui::Button::new(tl!(text)).min_size(vec2(56.0, 0.0))).clicked()
+                        && let Some(delta) = delta
+                    {
+                        change(app, f, json!({"qatMove": {"command": f.qat_selected, "by": delta}}));
                     }
                 }
             });

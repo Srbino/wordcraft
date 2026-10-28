@@ -314,7 +314,7 @@ fn combo_impl(
                 out = Some(v);
                 ui.close();
             }
-            if search {
+            if search && !super::managed_document_context(ui.ctx()) {
                 ui.separator();
                 if ui.button(tl!("Add Font…")).clicked() {
                     out = Some(ADD_FONT.to_string());

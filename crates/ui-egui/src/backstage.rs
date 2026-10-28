@@ -33,6 +33,9 @@ fn back_chevron_c(band_min_x: f32, center_y: f32, fullscreen: bool, content_left
 /// and Options pages work, and it handles Back, Escape, Save, Save As and Close routing.
 pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    if app.managed_document() && matches!(app.ui.backstage_page.as_str(), "home" | "new" | "recover" | "close") {
+        app.ui.backstage_page = "info".into();
+    }
     // No document open (#1129): only the pages that open or create one, and Options.
     let has_document = app.has_document();
     if !has_document && !works_without_document(&app.ui.backstage_page) {
@@ -75,6 +78,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             }
             ui.add_space(if mac { 12.0 } else { 6.0 });
             for (id, label, icon) in PAGES {
+                if app.managed_document() && matches!(id, "home" | "new" | "recover" | "close") {
+                    continue;
+                }
                 // No document open (#1129): Info, Save, Save As, Print and Export are greyed out.
                 let on = has_document || works_without_document(id);
                 let (r, resp) = ui.add_enabled_ui(on, |ui| ui.allocate_exact_size(vec2(200.0, 38.0), Sense::click())).inner;
@@ -125,6 +131,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 for (label, id) in [("About", "about"), ("Discord community", "discord")] {
+                    if id == "discord" && app.managed_document() {
+                        continue;
+                    }
                     let (r, resp) = ui.allocate_exact_size(vec2(200.0, 32.0), Sense::click());
                     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tl!(label)));
                     if resp.hovered() {
@@ -321,7 +330,9 @@ fn home_page(app: &mut WordApp, ui: &mut Ui) {
         app.ui.backstage_page = "new".into();
     }
     ui.add_space(24.0);
-    open_list(app, ui);
+    if !app.managed_document() {
+        open_list(app, ui);
+    }
 }
 
 /// New: the whole template gallery with a search box, then the personal templates (#2852); no
@@ -511,6 +522,9 @@ fn personal_error_id() -> egui::Id {
 /// Draws the Recent documents list, distinguishes duplicate names by path for screen readers, and
 /// stores an open failure in this page's temporary state.
 fn open_list(app: &mut WordApp, ui: &mut Ui) {
+    if app.managed_document() {
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(tl!("Recent")).font(semibold(16.0)));
     ui.add_space(6.0);
@@ -611,10 +625,11 @@ fn save_as_page(app: &mut WordApp, ui: &mut Ui) {
     }
     // A Word template in the user templates folder, which File › New lists under Personal (#2852).
     ui.add_space(8.0);
-    if ui
-        .button(egui::RichText::new(tl!("Save as Word Template…")).font(medium(14.0)))
-        .on_hover_text(tl!("Saves a .dotx template in your templates folder. It shows up in File › New under Personal."))
-        .clicked()
+    if !app.managed_document()
+        && ui
+            .button(egui::RichText::new(tl!("Save as Word Template…")).font(medium(14.0)))
+            .on_hover_text(tl!("Saves a .dotx template in your templates folder. It shows up in File › New under Personal."))
+            .clicked()
     {
         let _ = app.run("ui.saveAsTemplate", json!({}));
     }
@@ -665,24 +680,27 @@ fn info_page(app: &mut WordApp, ui: &mut Ui) {
         {
             let _ = app.run("ui.dialog", json!({"name": "customProperties"}));
         }
-        // Protect Document › Encrypt with Password (#55).
-        ui.add_space(18.0);
-        ui.label(egui::RichText::new(tl!("Protect Document")).font(semibold(15.0)));
-        let encrypted = info.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
-        ui.label(if encrypted {
-            tl!("A password is required to open this document.")
-        } else {
-            tl!("Anyone can open this document. Encrypt it with a password to keep it private.")
-        });
-        ui.horizontal(|ui| {
-            let label = if encrypted { tl!("Change Password…") } else { tl!("Encrypt with Password…") };
-            if ui.button(egui::RichText::new(label).font(medium(13.5))).clicked() {
-                let _ = app.run("file.encrypt", json!({}));
-            }
-            if encrypted && ui.button(egui::RichText::new(tl!("Remove Password")).font(medium(13.5))).clicked() {
-                let _ = app.run("file.encrypt", json!({"password": null}));
-            }
-        });
+        // DOCX file passwords are not protection for the host's native JSON snapshots.
+        if !app.managed_document() {
+            // Protect Document › Encrypt with Password (#55).
+            ui.add_space(18.0);
+            ui.label(egui::RichText::new(tl!("Protect Document")).font(semibold(15.0)));
+            let encrypted = info.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            ui.label(if encrypted {
+                tl!("A password is required to open this document.")
+            } else {
+                tl!("Anyone can open this document. Encrypt it with a password to keep it private.")
+            });
+            ui.horizontal(|ui| {
+                let label = if encrypted { tl!("Change Password…") } else { tl!("Encrypt with Password…") };
+                if ui.button(egui::RichText::new(label).font(medium(13.5))).clicked() {
+                    let _ = app.run("file.encrypt", json!({}));
+                }
+                if encrypted && ui.button(egui::RichText::new(tl!("Remove Password")).font(medium(13.5))).clicked() {
+                    let _ = app.run("file.encrypt", json!({"password": null}));
+                }
+            });
+        }
         let ui = &mut cols[1];
         ui.label(egui::RichText::new(tl!("Statistics")).font(semibold(15.0)));
         for (l, k) in [("Pages", "pages"), ("Words", "words"), ("Paragraphs", "paragraphs"), ("Sections", "sections"), ("Comments", "comments")] {

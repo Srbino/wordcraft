@@ -54,6 +54,9 @@ pub(super) fn context_menu(app: &mut WordApp, ui: &mut Ui) {
     }
     ui.set_min_width(220.0);
     let item = |ui: &mut Ui, app: &mut WordApp, label: &str, id: &str, params: serde_json::Value| {
+        if !app.host_command_visible(id) {
+            return;
+        }
         let sc = crate::widgets::shortcut_text(app, id);
         let on = crate::widgets::enabled(app, id);
         if ui.add_enabled(on, egui::Button::new(tl!(label)).shortcut_text(sc)).clicked() {
@@ -222,5 +225,36 @@ fn table_pick(s: &wordcraft_engine::Session) -> TablePick {
     match (s.sel.anchor.path.cell(), s.sel.focus.path.cell()) {
         (Some((ta, ra, ca)), Some((tb, rb, cb))) if ta == tb && (ra, ca) != (rb, cb) => TablePick::Cells,
         _ => TablePick::Cell,
+    }
+}
+
+#[cfg(test)]
+mod native_host_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn native_managed_context_menu_hides_clipboard_read_actions_only_in_that_profile() {
+        for fixed in [false, true] {
+            let mut app =
+                WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("copied selection")), crate::Services::default());
+            app.services.host_document_fixed = fixed;
+            app.run("select.all", json!({})).unwrap();
+            app.run("edit.copy", json!({})).unwrap();
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
+                |ui, app: &mut WordApp| {
+                    app.logic(ui.ctx());
+                    app.ui(ui);
+                    egui::Window::new("Context actions").show(ui.ctx(), |ui| context_menu(app, ui));
+                },
+                app,
+            );
+            h.run_steps(3);
+            assert!(h.query_all_by_label("Copy").count() >= 1);
+            assert!(h.query_by_label("Link… ").is_some(), "context missing: managed={fixed}");
+            for label in ["Paste Ctrl+V", "Keep Text Only Ctrl+Alt+Shift+V", "Merge Formatting ", "Paste Special… Ctrl+Alt+V"] {
+                assert_eq!(h.query_all_by_label(label).count() == 0, fixed, "{label}: managed={fixed}");
+            }
+        }
     }
 }

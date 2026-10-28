@@ -32,17 +32,103 @@ pub(crate) fn check(stream: &TcpStream) -> Result<(), ZoteroError> {
     let io = |e: std::io::Error| ZoteroError::Io(e.to_string());
     let (local, peer) = (stream.local_addr().map_err(io)?, stream.peer_addr().map_err(io)?);
     check_addr(&peer)?;
-    owner_check(local, peer)
+    #[cfg(target_os = "linux")]
+    {
+        owner_check(stream, local, peer)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        owner_check(local, peer)
+    }
 }
 
 /// Refuse a listener at `peer` that the kernel's socket tables say belongs to another user.
 /// A table that can't be read in full (I/O error) is a refusal, never "unknown".
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "android")]
 fn owner_check(local: SocketAddr, peer: SocketAddr) -> Result<(), ZoteroError> {
     let rows = scan_tables(["/proc/net/tcp", "/proc/net/tcp6"], |p| std::fs::File::open(p), local, peer)?;
     // Our uid when our own socket's row is missing: `/proc/self` belongs to this process's user.
     let me = std::fs::metadata("/proc/self").ok().map(|m| std::os::unix::fs::MetadataExt::uid(&m));
     decide(&rows, peer, me)
+}
+
+/// Linux reports an established but not yet accepted server socket as inode 0,
+/// uid 0. That is not evidence of a root-owned process. Wait briefly for ownership
+/// of this same connection to become observable, without sending any protocol bytes.
+#[cfg(target_os = "linux")]
+fn owner_check(stream: &TcpStream, local: SocketAddr, peer: SocketAddr) -> Result<(), ZoteroError> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let me = std::fs::metadata("/proc/self").ok().map(|m| std::os::unix::fs::MetadataExt::uid(&m));
+    observe_owner(
+        peer,
+        me,
+        || {
+            check_tuple(stream, local, peer)?;
+            let rows = scan_tables(["/proc/net/tcp", "/proc/net/tcp6"], |p| std::fs::File::open(p), local, peer)?;
+            check_tuple(stream, local, peer)?;
+            if Instant::now() >= deadline {
+                return Err(unverified_peer());
+            }
+            Ok(rows)
+        },
+        || {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            Instant::now() < deadline
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn check_tuple(stream: &TcpStream, local: SocketAddr, peer: SocketAddr) -> Result<(), ZoteroError> {
+    if stream.local_addr().ok() != Some(local) || stream.peer_addr().ok() != Some(peer) {
+        return Err(unverified_peer());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unverified_peer() -> ZoteroError {
+    ZoteroError::Refused("couldn't verify ownership of the same accepted Zotero connection".into())
+}
+
+#[cfg(target_os = "linux")]
+fn observe_owner(
+    peer: SocketAddr,
+    me: Option<u32>,
+    mut observe: impl FnMut() -> Result<Rows, ZoteroError>,
+    mut wait: impl FnMut() -> bool,
+) -> Result<(), ZoteroError> {
+    let mut pending_seen = false;
+    let mut pending_owner = None;
+    for _ in 0..50 {
+        let rows = observe()?;
+        if rows.theirs.is_some() && rows.theirs_state == Some(1) && rows.theirs_inode == Some(0) {
+            let owner = rows.ours.or(me).ok_or_else(unverified_peer)?;
+            if pending_seen && pending_owner != Some(owner) {
+                return Err(unverified_peer());
+            }
+            pending_seen = true;
+            pending_owner = Some(owner);
+            if !wait() {
+                return Err(unverified_peer());
+            }
+            continue;
+        }
+        // Once a pending socket was seen, disappearance is not the legacy WSL/proxy
+        // case. Never downgrade a known connection to the unknown-owner fallback.
+        if pending_seen && (rows.ours.or(me) != pending_owner || rows.theirs != pending_owner) {
+            return Err(unverified_peer());
+        }
+        if rows.theirs.is_some() && (rows.theirs_state != Some(1) || rows.theirs_inode.is_none_or(|inode| inode == 0)) {
+            return Err(unverified_peer());
+        }
+        return decide(&rows, peer, me);
+    }
+    Err(unverified_peer())
 }
 
 /// Windows, macOS, the BSDs: no same-user check (no socket table to read without OS calls this
@@ -76,10 +162,14 @@ fn scan_tables<R: std::io::Read>(
 }
 
 /// The uids found for the two rows of one connection.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Rows {
     ours: Option<u32>,
     theirs: Option<u32>,
+    #[cfg(target_os = "linux")]
+    theirs_state: Option<u8>,
+    #[cfg(target_os = "linux")]
+    theirs_inode: Option<u64>,
 }
 
 impl Rows {
@@ -109,15 +199,35 @@ fn scan_table(mut table: impl std::io::BufRead, local: SocketAddr, peer: SocketA
         }
         let line = String::from_utf8_lossy(&line);
         let mut f = line.split_whitespace();
-        let (Some(l), Some(r), Some(uid)) = (f.nth(1).and_then(parse_addr), f.next().and_then(parse_addr), f.nth(4)) else {
-            continue;
-        };
-        let Ok(uid) = uid.parse::<u32>() else { continue };
+        let (Some(l), Some(r)) = (f.nth(1).and_then(parse_addr), f.next().and_then(parse_addr)) else { continue };
         let (l, r) = (key(l), key(r));
+        if !((l == local && r == peer) || (l == peer && r == local)) {
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        let (uid, state, inode) = {
+            let state = f.next().and_then(|s| u8::from_str_radix(s, 16).ok());
+            let uid = f.nth(3).and_then(|s| s.parse::<u32>().ok());
+            let inode = f.nth(1).and_then(|s| s.parse::<u64>().ok());
+            let (Some(uid), Some(state), Some(inode)) = (uid, state, inode) else {
+                return Err(unverified_peer());
+            };
+            (uid, state, inode)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let uid = {
+            let Some(uid) = f.nth(4).and_then(|s| s.parse::<u32>().ok()) else { continue };
+            uid
+        };
         if l == local && r == peer {
             rows.ours = Some(uid);
-        } else if l == peer && r == local {
+        } else {
             rows.theirs = Some(uid);
+            #[cfg(target_os = "linux")]
+            {
+                rows.theirs_state = Some(state);
+                rows.theirs_inode = Some(inode);
+            }
         }
         if rows.done() {
             return Ok(());
@@ -411,5 +521,153 @@ mod tests {
         let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let _accepted = listener.accept().unwrap();
         assert_eq!(check(&stream), Ok(()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pending_kernel_peer_waits_for_accept_before_ownership_is_decided() {
+        use std::{io::Read, sync::mpsc, time::Duration};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (send, receive) = mpsc::channel();
+        let (started, wait_started) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let checked = check(&stream);
+            send.send((checked, stream)).unwrap();
+        });
+        wait_started.recv_timeout(Duration::from_secs(2)).unwrap();
+        // This socket belongs to the kernel until accept(), not to uid 0's process.
+        // It must neither be trusted nor rejected as an accepted root-owned socket.
+        assert!(
+            matches!(receive.recv_timeout(Duration::from_millis(60)), Err(mpsc::RecvTimeoutError::Timeout)),
+            "ownership cannot be decided before accept"
+        );
+        let (mut accepted, _) = listener.accept().unwrap();
+        accepted.set_nonblocking(true).unwrap();
+        let (result, _guarded_client) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(result, Ok(()));
+        assert_eq!(accepted.read(&mut [0u8; 1]).unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "the observation sent no bytes");
+        worker.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kernel_rows(uid: u32, inode: u64, state: u8) -> Rows {
+        let (local, peer) = addrs();
+        let theirs = row(peer, local, uid).replace(" 12345 ", &format!(" {inode} ")).replacen(" 01 ", &format!(" {state:02X} "), 1);
+        let mut rows = Rows::default();
+        scan_table(format!("{HEADER}{}{theirs}", row(local, peer, 1000)).as_bytes(), local, peer, &mut rows).unwrap();
+        rows
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_ownership_never_downgrades_to_unknown_or_foreign() {
+        let (_, peer) = addrs();
+        let pending = kernel_rows(0, 0, 1);
+        let mut sequence = std::collections::VecDeque::from([pending.clone(), kernel_rows(1000, 12345, 1)]);
+        assert_eq!(observe_owner(peer, Some(1000), || Ok(sequence.pop_front().unwrap()), || true), Ok(()));
+        let mut missing_ours = kernel_rows(1000, 12345, 1);
+        missing_ours.ours = None;
+        let mut own_fallback = std::collections::VecDeque::from([pending.clone(), missing_ours]);
+        assert_eq!(
+            observe_owner(peer, Some(1000), || Ok(own_fallback.pop_front().unwrap()), || true),
+            Ok(()),
+            "accepted server plus the same stream preserves the process-UID fallback for our absent row"
+        );
+        let mut root = kernel_rows(0, 12345, 1);
+        root.ours = Some(0);
+        assert_eq!(observe_owner(peer, Some(0), || Ok(root.clone()), || panic!("accepted same-user root does not wait")), Ok(()));
+        let mut pending_root = kernel_rows(0, 0, 1);
+        pending_root.ours = Some(0);
+        let mut root_sequence = std::collections::VecDeque::from([pending_root, root]);
+        let waits = std::cell::Cell::new(0);
+        assert_eq!(
+            observe_owner(
+                peer,
+                Some(0),
+                || Ok(root_sequence.pop_front().unwrap()),
+                || {
+                    waits.set(waits.get() + 1);
+                    true
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(waits.get(), 1, "pending inode0 is never accepted even for root");
+        let mut changed_ours = kernel_rows(1001, 12345, 1);
+        changed_ours.ours = Some(1001);
+        for final_rows in [kernel_rows(0, 12345, 1), kernel_rows(1001, 12345, 1), kernel_rows(1000, 0, 8), Rows::default(), changed_ours] {
+            let mut sequence = std::collections::VecDeque::from([pending.clone(), final_rows]);
+            assert!(matches!(observe_owner(peer, Some(1000), || Ok(sequence.pop_front().unwrap()), || true), Err(ZoteroError::Refused(_))));
+        }
+        for uid in [0, 1001] {
+            assert!(matches!(
+                observe_owner(peer, Some(1000), || Ok(kernel_rows(uid, 12345, 1)), || panic!("accepted foreign peers must not be retried")),
+                Err(ZoteroError::Refused(_))
+            ));
+        }
+        assert!(matches!(observe_owner(peer, Some(1000), || Ok(pending.clone()), || false), Err(ZoteroError::Refused(_))));
+        let observations = std::cell::Cell::new(0);
+        assert!(matches!(
+            observe_owner(
+                peer,
+                Some(1000),
+                || {
+                    observations.set(observations.get() + 1);
+                    Ok(pending.clone())
+                },
+                || true
+            ),
+            Err(ZoteroError::Refused(_))
+        ));
+        assert_eq!(observations.get(), 50, "even an always-ready wait has a finite observation budget");
+        let mut first = true;
+        assert!(matches!(
+            observe_owner(
+                peer,
+                Some(1000),
+                || {
+                    if std::mem::take(&mut first) {
+                        Ok(pending.clone())
+                    } else {
+                        Err(unreadable(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)))
+                    }
+                },
+                || true
+            ),
+            Err(ZoteroError::Refused(_))
+        ));
+        // Preserve the original initial fully-read WSL/proxy fallback only.
+        assert_eq!(observe_owner(peer, Some(1000), || Ok(Rows::default()), || panic!("unknown is not pending")), Ok(()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn matching_malformed_inode_is_refused_and_tuple_cannot_change() {
+        let (local, peer) = addrs();
+        let malformed = format!("{HEADER}{}{}", row(local, peer, 1000), row(peer, local, 1000).replace(" 12345 ", " not-an-inode "));
+        assert!(matches!(same_owner(&malformed, local, peer, Some(1000)), Err(ZoteroError::Refused(_))));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _accepted = listener.accept().unwrap();
+        assert!(matches!(check_tuple(&stream, stream.local_addr().unwrap(), peer), Err(ZoteroError::Refused(_))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_never_accepted_peer_times_out_without_sending_bytes() {
+        use std::{
+            io::Read,
+            time::{Duration, Instant},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let start = Instant::now();
+        assert!(matches!(check(&stream), Err(ZoteroError::Refused(_))));
+        assert!(start.elapsed() < Duration::from_secs(2), "the observation deadline is bounded");
+        let (mut accepted, _) = listener.accept().unwrap();
+        accepted.set_nonblocking(true).unwrap();
+        assert_eq!(accepted.read(&mut [0u8; 1]).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 }

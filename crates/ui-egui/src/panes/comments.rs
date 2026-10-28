@@ -401,4 +401,44 @@ mod native_snapshot_tests {
         assert_eq!(app.session.doc.plain_text(StoryRef::Part(part)), "pending local comment");
         assert!(app.session.dirty);
     }
+    #[test]
+    fn native_managed_import_saves_pending_old_comment_before_reusing_its_identity() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::from_text("old body")), Services::default());
+        app.run("review.newComment", json!({"text":"old comment"})).unwrap();
+        let id = *app.session.doc.comments.keys().next().unwrap();
+        drafts(&mut app).record_edit(id, "pending comment to save".into());
+        let saves = crate::async_saves::AsyncSaves::default();
+        let hook = saves.clone();
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = captured.clone();
+        app.services.host_document_fixed = true;
+        app.services.download = Some(Box::new(|_, _| Err("native save is not a download".into())));
+        app.services.async_saves = Some(saves.clone());
+        app.services.host_save_request = Some(Box::new(move |session, _| {
+            let ticket = hook.start();
+            seen.borrow_mut().push((ticket, serde_json::to_value(&session.doc).unwrap()));
+            Ok(ticket)
+        }));
+        let mut imported = Session::new(wordcraft_doc::Document::from_text("new body"));
+        imported.run("review.newComment", &json!({"text":"imported comment"})).unwrap();
+        let bytes = wordcraft_engine::io::save_bytes("picked.docx", &imported.doc).unwrap();
+        let document = app.session.document_id();
+        app.run("file.open", json!({"path":"picked.docx","data":wordcraft_engine::cmd::insert::base64_encode(&bytes)})).unwrap();
+        let old = serde_json::to_value(&app.session.doc).unwrap();
+        assert!(serde_json::to_string(&old).unwrap().contains("pending comment to save"));
+        app.run("ui.saveChanges", json!({"answer":"save"})).unwrap();
+        assert_eq!(captured.borrow().len(), 1);
+        assert_eq!(captured.borrow()[0].1, old, "the held-back import cannot enter the old save payload");
+        app.settle_async_saves();
+        assert_eq!(serde_json::to_value(&app.session.doc).unwrap(), old);
+        app.session.dirty = false; // Exact old-snapshot ACK accepted by the capability bridge.
+        saves.finish(captured.borrow()[0].0, crate::async_saves::SaveOutcome::Saved);
+        app.settle_async_saves();
+        assert_eq!(app.session.document_id(), document);
+        app.prepare_native_snapshot().unwrap();
+        let comments: Vec<_> = app.session.doc.comments.values().map(|c| app.session.doc.plain_text(StoryRef::Part(c.part))).collect();
+        assert_eq!(comments, ["imported comment"]);
+        assert!(!has_comment_drafts(&app));
+        assert!(app.session.dirty);
+    }
 }

@@ -41,8 +41,11 @@ impl WordApp {
             self.dialog = dialogs::Dialog::open(name, self);
             return Ok(json!({"pending": name}));
         }
+        // Ordinary Open opens another document. A fixed host imports into the current one,
+        // so its picked payload must wait for the same Save/Don't Save/Cancel guard as Close.
+        let imports_current = self.managed_document() && id == "file.open" && params.get("data").is_some();
         if (self.session.dirty || self.save_unconfirmed() || refused.is_some())
-            && discards_document(id, &params)
+            && (discards_document(id, &params) || imports_current)
             && !self.closes_only_its_window(id, &params)
         {
             let name = self.prompt_name();
@@ -117,7 +120,66 @@ impl WordApp {
         self.execute_inner("file.open", params, true)
     }
 
+    /// A managed save host owns this one document's lifecycle and browser capabilities.
+    pub(crate) fn managed_document(&self) -> bool {
+        self.services.host_document_fixed
+    }
+
+    pub(crate) fn host_command_visible(&self, id: &str) -> bool {
+        if !self.managed_document() || id.is_empty() {
+            return true;
+        }
+        // The opaque host cannot read the current OS clipboard for a menu/button action.
+        // User paste events carry their own payload and keep using these engine commands.
+        if crate::system_clipboard::is_paste(id) {
+            return false;
+        }
+        if id.starts_with("ui.zotero.") || (!id.starts_with("ui.") && self.session.registry.get(id).is_none()) {
+            return false;
+        }
+        !matches!(
+            id,
+            "file.new"
+                | "file.import" // Binary-data API; the visible Open picker supplies its payload.
+                | "file.newFromTemplate"
+                | "file.close"
+                | "file.recover"
+                | "file.autosave"
+                | "file.saveTemplate"
+                | "file.encrypt"
+                | "file.rename"
+                | "references.researcher"
+                | "design.setDefault"
+                | "font.add"
+                | "font.remove"
+                | "font.loadSystem"
+                | "ui.saveAsTemplate"
+                | "view.newWindow"
+                | "ui.newWindow"
+                | "view.arrangeAll"
+                | "view.switchWindows"
+                | "view.fullScreen"
+                | "tools.templates"
+                | "tools.macros"
+                | "tools.recordMacro"
+                | "review.compare"
+                | "review.combine"
+                | "review.readAloud"
+                | "mailings.envelopes"
+                | "mailings.labels"
+                | "mailings.finish"
+                | "mailings.print"
+                | "mailings.printDocuments"
+                | "ui.discord"
+                | "ui.checkForUpdates"
+                | "help.checkForUpdates"
+        )
+    }
+
     pub(crate) fn host_command_allowed(&self, id: &str) -> bool {
+        if !self.host_command_routable(id) {
+            return false;
+        }
         let view_ui = matches!(
             id,
             "ui.tab"
@@ -136,7 +198,14 @@ impl WordApp {
     }
 
     fn check_host_access(&self, id: &str) -> Result<(), String> {
+        if !self.host_command_routable(id) {
+            return Err("this command is managed by the embedding host and is not available inside this document".into());
+        }
         if self.host_command_allowed(id) { Ok(()) } else { Err("the host has made this document read-only".into()) }
+    }
+
+    fn host_command_routable(&self, id: &str) -> bool {
+        self.host_command_visible(id) || (self.managed_document() && crate::system_clipboard::is_paste(id))
     }
 
     fn execute_inner(&mut self, id: &str, params: Value, host_import: bool) -> Result<Value, String> {
@@ -205,10 +274,10 @@ impl WordApp {
             return Ok(json!({"pendingSave": ticket}));
         }
         // Web: saving and exporting become downloads.
-        if self.services.download.is_some() && matches!(id, "file.save" | "file.saveAs" | "file.exportPdf" | "file.exportPng") {
+        if self.services.download.is_some() && matches!(id, "file.save" | "file.saveAs" | "file.exportPdf" | "file.exportPng" | "file.printPdf") {
             let host_managed = self.services.host_save_request.is_some();
             let name = params.get("path").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| self.web_save_name(id));
-            let name = if id == "file.exportPdf" && !name.ends_with(".pdf") { format!("{name}.pdf") } else { name };
+            let name = if matches!(id, "file.exportPdf" | "file.printPdf") && !name.ends_with(".pdf") { format!("{name}.pdf") } else { name };
             // A save with a password encrypts this and later saves (`file.save`'s `password`).
             if matches!(id, "file.save" | "file.saveAs")
                 && let Some(pw) = params.get("password").filter(|v| !v.is_null())
@@ -234,7 +303,11 @@ impl WordApp {
                 None
             };
             let opts = wordcraft_engine::cmd::file::export_options(&self.session, &params);
-            let bytes = wordcraft_engine::io::save_bytes_with(&name, &self.session.doc, password, &opts)?;
+            let bytes = if id == "file.printPdf" {
+                self.session.print_pdf(&params).map_err(|error| error.to_string())?.0
+            } else {
+                wordcraft_engine::io::save_bytes_with(&name, &self.session.doc, password, &opts)?
+            };
             // A ticket left over from an earlier call isn't this save's.
             let saves = self.services.async_saves.clone();
             if let Some(saves) = &saves {
@@ -280,13 +353,19 @@ impl WordApp {
         let math_session = self.session.math.as_ref().map(|m| m.session);
         let composing_before = !self.canvas.ime_preedit.is_empty();
         let old_path = self.session.path.clone();
+        let imports_current = self.managed_document() && id == "file.open" && params.get("data").is_some();
         let r = if host_import {
             self.session.open_from_host(&params).map_err(|e| e.to_string())
+        } else if imports_current {
+            self.session.run("file.import", &params).map_err(|e| e.to_string())
         } else if self.ime_origin {
             self.session.run_ime(id, &params).map_err(|e| e.to_string())
         } else {
             self.session.run(id, &params).map_err(|e| e.to_string())
         };
+        if imports_current && r.is_ok() {
+            self.comment_drafts = Default::default();
+        }
         if self.session.ime_body_epoch() != body_epoch {
             self.canvas.ime_interrupted_preedit |= composing_before;
             // The body (or the whole document) was replaced under the same id — setText, a

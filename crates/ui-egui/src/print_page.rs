@@ -365,6 +365,11 @@ pub fn export_formats(app: &mut WordApp, ui: &mut Ui) {
         ("Plain text (*.txt)", "txt"),
         ("Page image (*.png)", "png"),
     ] {
+        // This host exports one file. Markdown's picture links need media sidecars that
+        // cannot accompany the copy; text-only Markdown remains a supported export.
+        if app.managed_document() && ext == "md" && !app.session.doc.media.is_empty() {
+            continue;
+        }
         if ui.add(egui::Button::new(egui::RichText::new(tl!(label)).font(medium(13.5))).min_size(vec2(320.0, 34.0))).clicked() {
             app.export_dialog(ext);
         }

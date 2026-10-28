@@ -71,33 +71,39 @@ pub(super) fn view(app: &mut WordApp, ui: &mut Ui) {
         });
     });
     group(ui, "Window", None, app, |ui, app| {
-        big(ui, app, "newWindow", "New\nWindow", "view.newWindow", json!({}), false);
-        big(ui, app, "arrangeAll", "Arrange\nAll", "view.arrangeAll", json!({}), false);
+        if !app.managed_document() {
+            big(ui, app, "newWindow", "New\nWindow", "view.newWindow", json!({}), false);
+            big(ui, app, "arrangeAll", "Arrange\nAll", "view.arrangeAll", json!({}), false);
+        }
         big(ui, app, "split", "Split", "view.split", json!({}), false);
-        menu_button(
-            ui,
-            app,
-            "switchWindows",
-            Some("Switch\nWindows"),
-            "Switch Windows",
-            true,
-            "view.switchWindows",
-            crate::documents::switch_windows_menu,
-        );
-        // The Full Screen button carries its name for assistive technology (and for the
-        // regression test that clicks it): big buttons are otherwise drawn unlabeled. Its
-        // enabled state is the command's own, as every other ribbon control reports: the
-        // browser has no full screen to ask for, and says so (#662).
-        let on = crate::widgets::enabled(app, "view.fullScreen");
-        let resp = big_toggle(ui, app, "fullScreen", "Full\nScreen", "view.fullScreen", v.full_screen);
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, on, v.full_screen, "Full Screen"));
+        if !app.managed_document() {
+            menu_button(
+                ui,
+                app,
+                "switchWindows",
+                Some("Switch\nWindows"),
+                "Switch Windows",
+                true,
+                "view.switchWindows",
+                crate::documents::switch_windows_menu,
+            );
+            // The Full Screen button carries its name for assistive technology (and for the
+            // regression test that clicks it): big buttons are otherwise drawn unlabeled. Its
+            // enabled state is the command's own, as every other ribbon control reports: the
+            // browser has no full screen to ask for, and says so (#662).
+            let on = crate::widgets::enabled(app, "view.fullScreen");
+            let resp = big_toggle(ui, app, "fullScreen", "Full\nScreen", "view.fullScreen", v.full_screen);
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, on, v.full_screen, "Full Screen"));
+        }
     });
-    group(ui, "Macros", None, app, |ui, app| {
-        big(ui, app, "macros", "Macros", "tools.macros", json!({}), false);
-    });
-    group(ui, "Templates", None, app, |ui, app| {
-        big(ui, app, "documentTemplate", "Templates", "tools.templates", json!({}), false);
-    });
+    if !app.managed_document() {
+        group(ui, "Macros", None, app, |ui, app| {
+            big(ui, app, "macros", "Macros", "tools.macros", json!({}), false);
+        });
+        group(ui, "Templates", None, app, |ui, app| {
+            big(ui, app, "documentTemplate", "Templates", "tools.templates", json!({}), false);
+        });
+    }
 }
 
 /// The Outlining tab (Outline view): outline levels, moving, expanding and collapsing, what is

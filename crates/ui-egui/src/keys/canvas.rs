@@ -12,6 +12,10 @@ use super::*;
 /// Events for the focused canvas: text, editing keys, clipboard, IME. While keytips are showing
 /// every key belongs to them (letters pick badges, Escape cancels), so nothing here runs.
 pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
+    // InputState.modifiers is the FINAL state of the raw batch. A later Ctrl+S must
+    // not turn text that preceded its keydown into a command echo and drop it.
+    let held = ctx.input(|i| i.modifiers);
+    let mut text_modifiers = std::mem::replace(&mut app.canvas.text_modifiers, held);
     if app.ui.keytips != crate::keytips::Phase::Off {
         return;
     }
@@ -72,11 +76,17 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
     let mut interrupted_preedit = std::mem::take(&mut app.canvas.ime_interrupted_preedit);
     let mut interrupted_replacement = EquationReplacementDrop::None;
     // Mod held since an earlier frame (its ModifiersChanged went by then).
-    let held = ctx.input(|i| i.modifiers);
     if held.command {
         app.canvas.paste_mods = Some(held);
     }
     for e in events {
+        match &e {
+            egui::Event::ModifiersChanged(m) | egui::Event::Key { modifiers: m, .. } | egui::Event::PointerButton { modifiers: m, .. } => {
+                text_modifiers = *m;
+            }
+            egui::Event::WindowFocused(false) => text_modifiers = egui::Modifiers::default(),
+            _ => {}
+        }
         // A key closed the window (Mod+W) or brought another forward: the frame's other keys
         // were typed in this one and are dropped.
         if app.windows.shown() != window {
@@ -220,7 +230,7 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         if app.session.math.is_some() {
             match &e {
                 egui::Event::Text(t) => {
-                    let m = ctx.input(|i| i.modifiers);
+                    let m = text_modifiers;
                     let is_cmd = if cfg!(target_os = "macos") { m.command } else { (m.command || m.ctrl) && !m.alt };
                     if !is_cmd && !t.is_empty() && t.chars().all(|c| !c.is_control()) {
                         let _ = app.run("equation.type", json!({"text": t}));
@@ -304,7 +314,7 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         }
         match e {
             egui::Event::Text(t) => {
-                let m = ctx.input(|i| i.modifiers);
+                let m = text_modifiers;
                 let is_cmd = if cfg!(target_os = "macos") { m.command } else { (m.command || m.ctrl) && !m.alt };
                 if is_cmd {
                     continue;

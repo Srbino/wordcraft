@@ -7205,3 +7205,485 @@ fn native_host_readonly_bootstrap_import_keeps_guard_and_blocks_ui_authority() {
     assert_eq!(app.session.rev(), committed_revision);
     assert!(app.session.dirty, "read-only export is not a storage acknowledgement");
 }
+
+#[test]
+fn native_managed_inbox_docx_import_edits_the_bound_document() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.session.dirty = false; // The host has already durably opened this version.
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    let id = a.session.document_id();
+    let document = wordcraft_doc::Document::from_text("Managed DOCX import");
+    let bytes = wordcraft_engine::io::save_bytes("picked.docx", &document).unwrap();
+    inbox.lock().unwrap().push(("picked.docx".into(), bytes));
+    a.drain_inbox();
+    assert_eq!(a.session.document_id(), id);
+    assert!(a.session.dirty);
+    assert_eq!(body_text(&a), "Managed DOCX import");
+    a.run("edit.undo", json!({})).unwrap();
+    assert_ne!(body_text(&a), "Managed DOCX import");
+}
+
+#[test]
+fn native_managed_profile_hides_unroutable_pages_and_external_actions() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.backstage = true;
+    a.ui.backstage_page = "home".into();
+    let mut h = harness(a);
+    h.run_steps(5);
+    for label in ["Blank document", "New", "Close", "Recover", "Discord community"] {
+        assert!(h.query_by_label(label).is_none(), "{label} cannot run in a fixed host document");
+    }
+    assert!(h.query_all_by_label("Info").next().is_some());
+    h.state_mut().ui.backstage = false;
+    h.state_mut().ui.tab = "Help".into();
+    h.run_steps(5);
+    for label in ["Discord", "Zotero", "Community Discord", "Check for Updates…"] {
+        assert!(h.query_by_label(label).is_none(), "{label} needs unavailable external capabilities");
+    }
+}
+
+#[test]
+fn native_managed_print_pages_pdf_uses_the_download_hook_without_filesystem_or_save_ack() {
+    let (mut a, _, requests) = fixed_managed_host_app();
+    let files = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let capture = files.clone();
+    a.services.download = Some(Box::new(move |name, bytes| {
+        capture.borrow_mut().push((name.to_string(), bytes.to_vec()));
+        Ok(())
+    }));
+    let dir = scratch("native-managed-print-pdf");
+    let path = dir.join("print-copy.pdf");
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let dirty = a.session.dirty;
+    let result = a.run("file.printPdf", json!({"path":path.to_string_lossy(),"copies":2,"range":"all"})).unwrap();
+    assert_eq!(files.borrow().len(), 1);
+    assert!(files.borrow()[0].1.starts_with(b"%PDF-"));
+    assert!(!path.exists(), "web exports must not write a host filesystem path");
+    assert_eq!(result["downloaded"], path.to_string_lossy().as_ref());
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert_eq!(a.session.dirty, dirty);
+    assert!(requests.borrow().is_empty(), "printing a copy does not request a native server save");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn native_managed_profile_refuses_commands_that_switch_document_or_use_external_services() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    let original = a.session.document_id();
+    for command in [
+        "file.new",
+        "file.close",
+        "file.recover",
+        "view.newWindow",
+        "ui.newWindow",
+        "view.switchWindows",
+        "mailings.printDocuments",
+        "ui.discord",
+        "ui.checkForUpdates",
+    ] {
+        assert!(a.execute(command, json!({})).is_err(), "{command} must be routed through the host or hidden");
+        assert_eq!(a.session.document_id(), original);
+    }
+}
+
+#[test]
+fn native_managed_inbox_import_refuses_the_readonly_holder_without_changing_content() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    let document = wordcraft_doc::Document::from_text("forbidden late import");
+    let bytes = wordcraft_engine::io::save_bytes("late.docx", &document).unwrap();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let id = a.session.document_id();
+    a.session.set_host_read_only(true);
+    inbox.lock().unwrap().push(("late.docx".into(), bytes));
+    a.drain_inbox();
+    assert_eq!(a.session.document_id(), id);
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+}
+
+fn fixed_managed_host_app() -> (WordApp, async_saves::AsyncSaves, std::rc::Rc<std::cell::RefCell<Vec<u64>>>) {
+    let (mut app, saves, requests) = managed_host_app();
+    app.services.host_document_fixed = true;
+    (app, saves, requests)
+}
+
+#[test]
+fn native_managed_dirty_docx_import_waits_for_old_snapshot_confirmation() {
+    let (mut a, saves, requests) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let document = a.session.document_id();
+    let imported = wordcraft_engine::io::save_bytes("picked.docx", &wordcraft_doc::Document::from_text("Imported after old save")).unwrap();
+    let params = json!({"path":"picked.docx","data":wordcraft_engine::cmd::insert::base64_encode(&imported)});
+    assert_eq!(a.run("file.open", params).unwrap()["pending"], "saveChanges");
+    assert_eq!(a.run("ui.saveChanges", json!({"answer":"save"})).unwrap()["pending"], "save");
+    assert_eq!(requests.borrow().len(), 1);
+    a.settle_async_saves();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before, "without an ACK the old contents stay installed");
+    assert_eq!(a.session.document_id(), document);
+    // The bridge only clears dirty after an exact current old-snapshot acknowledgement.
+    a.session.dirty = false;
+    saves.finish(requests.borrow()[0], async_saves::SaveOutcome::Saved);
+    a.settle_async_saves();
+    assert_eq!(a.session.document_id(), document);
+    assert_eq!(body_text(&a), "Imported after old save");
+    assert!(a.session.dirty, "the imported contents need their own server save");
+    assert_eq!(requests.borrow().len(), 1, "the old confirmation is not an imported-document save");
+}
+
+#[test]
+fn native_managed_failed_import_save_preserves_old_contents_and_allows_cancel() {
+    let (mut a, saves, requests) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let imported = wordcraft_engine::io::save_bytes("picked.docx", &wordcraft_doc::Document::from_text("Do not install before save")).unwrap();
+    a.run("file.open", json!({"path":"picked.docx","data":wordcraft_engine::cmd::insert::base64_encode(&imported)})).unwrap();
+    a.run("ui.saveChanges", json!({"answer":"save"})).unwrap();
+    saves.finish(requests.borrow()[0], async_saves::SaveOutcome::Failed("server did not confirm".into()));
+    a.settle_async_saves();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert_eq!(prompt(&a), Some("saveChanges"));
+    a.run("ui.saveChanges", json!({"answer":"cancel"})).unwrap();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert!(a.session.dirty);
+}
+
+#[test]
+fn native_managed_paste_controls_are_hidden_without_blocking_user_payloads() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.tab = "Home".into();
+    for id in ["edit.paste", "edit.pasteText", "edit.pasteMerge", "edit.pasteSpecial"] {
+        assert!(!a.host_command_visible(id), "{id} cannot read the current OS clipboard in the opaque host");
+    }
+    let mut h = harness(a);
+    h.run_steps(5);
+    for label in ["Paste", "Paste (⌘V)", "Paste (Ctrl+V)"] {
+        assert!(h.query_by_label(label).is_none(), "{label}");
+    }
+    assert!(h.query_by_label("Copy").is_some());
+    h.state_mut().run("edit.paste", json!({"text":"user-approved payload"})).unwrap();
+    assert!(body_text(h.state()).contains("user-approved payload"));
+    h.state_mut().session.set_host_read_only(true);
+    let before = serde_json::to_value(&h.state().session.doc).unwrap();
+    assert!(h.state_mut().run("edit.paste", json!({"text":"forbidden payload"})).is_err());
+    assert_eq!(serde_json::to_value(&h.state().session.doc).unwrap(), before);
+}
+
+#[test]
+fn native_managed_recent_paths_are_hidden_but_the_file_picker_remains_visible() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.backstage = true;
+    a.ui.backstage_page = "open".into();
+    a.ui.recent = vec!["native-version.json".into()];
+    let mut h = harness(a);
+    h.run_steps(5);
+    assert!(h.query_by_label("Browse…").is_some());
+    assert!(
+        h.query_by_label("native-version.json").is_none(),
+        "the opaque editor cannot reopen a parent-owned native version from a filesystem path"
+    );
+}
+
+#[test]
+fn native_managed_info_does_not_offer_docx_file_password_as_native_protection() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    assert!(
+        a.run("file.encrypt", json!({"password":"test-only"})).is_err(),
+        "a DOCX file password is Session state, not part of the native snapshot the host stores"
+    );
+    assert!(a.session.password.is_none());
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    a.ui.backstage = true;
+    a.ui.backstage_page = "info".into();
+    let mut h = harness(a);
+    h.run_steps(5);
+    assert!(h.query_by_label("Encrypt with Password…").is_none());
+    assert!(h.query_by_label("Advanced Properties…").is_some());
+}
+
+#[test]
+fn native_managed_markdown_exports_hide_unbundled_media_but_keep_text_only_copies() {
+    use egui_kittest::kittest::Queryable;
+    for (fixed, picture, visible) in [(true, false, true), (true, true, false), (false, true, true)] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        if picture {
+            a.run("insert.picture", json!({"data":"iVBORw0KGgoAAAANSUhEUgAAACAAAAAQCAYAAAB3AH1ZAAAAKElEQVR4nGMQibrznxJ8R0ODIsww6oBRB4w6YNQBow4YdcCoAwbaAQCfenQ9EOdSfAAAAABJRU5ErkJggg=="})).unwrap();
+        }
+        a.ui.backstage = true;
+        a.ui.backstage_page = "export".into();
+        let mut h = harness(a);
+        h.run_steps(5);
+        assert_eq!(h.query_by_label("Markdown (*.md)").is_some(), visible, "managed={fixed}, picture={picture}");
+        assert!(h.query_by_label("Word document (*.docx)").is_some());
+    }
+}
+
+#[test]
+fn native_managed_profile_hides_registered_research_and_default_template_stubs() {
+    fn painted_text(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| painted_text(shape, out)),
+            _ => {}
+        }
+    }
+    for fixed in [false, true] {
+        for (tab, id, label) in [("References", "references.researcher", "Researcher"), ("Design", "design.setDefault", "Set as Default")] {
+            let (mut a, _, _) = fixed_managed_host_app();
+            a.services.host_document_fixed = fixed;
+            assert_eq!(a.host_command_visible(id), !fixed, "{id}");
+            let before = serde_json::to_value(&a.session.doc).unwrap();
+            assert_eq!(a.run(id, json!({})).is_err(), fixed, "{id}");
+            assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+            a.ui.tab = tab.into();
+            let mut h = harness(a);
+            h.run_steps(5);
+            let mut texts = vec![];
+            for shape in &h.output().shapes {
+                painted_text(&shape.shape, &mut texts);
+            }
+            assert_eq!(texts.iter().any(|text| text == label), !fixed, "{tab}: {label}");
+        }
+    }
+}
+
+#[test]
+fn native_managed_profile_refuses_unpersisted_font_files_and_local_font_queries() {
+    for fixed in [false, true] {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = calls.clone();
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.services.load_system_fonts = Some(Box::new(move || counter.set(counter.get() + 1)));
+        assert_eq!(a.host_command_visible("font.loadSystem"), !fixed);
+        assert_eq!(a.host_command_visible("font.add"), !fixed, "custom font bytes are absent from native snapshots");
+        assert_eq!(a.host_command_visible("font.remove"), !fixed);
+        assert_eq!(a.run("font.loadSystem", json!({})).is_err(), fixed);
+        assert_eq!(calls.get(), usize::from(!fixed));
+        a.ui.tab = "Home".into();
+        let mut h = harness(a);
+        h.run_steps(5);
+        assert_eq!(crate::widgets::managed_document_context(&h.ctx), fixed);
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Font options").click();
+        h.run_steps(3);
+        assert_eq!(h.query_by_label("Add Font…").is_some(), !fixed);
+    }
+}
+
+#[test]
+fn native_managed_external_about_references_are_readable_without_navigation_actions() {
+    use egui_kittest::kittest::Queryable;
+    for fixed in [false, true] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.run("ui.dialog", json!({"name":"about"})).unwrap();
+        let mut h = harness(a);
+        h.run_steps(6);
+        assert_eq!(h.query_all_by_role(egui::accesskit::Role::Link).count(), if fixed { 0 } else { 3 });
+        assert!(h.query_by_label("Source code: github.com/storytold/wordcraft").is_some());
+        assert!(h.query_by_label("Contributors").is_some());
+        assert!(h.query_by_label("Models").is_some());
+    }
+}
+
+#[test]
+fn native_managed_title_keeps_host_name_without_an_unpersisted_rename_action() {
+    use egui_kittest::kittest::{NodeT, Queryable};
+    for fixed in [false, true] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.session.path = Some(std::path::PathBuf::from("native-version.json"));
+        assert_eq!(a.host_command_visible("file.rename"), !fixed);
+        let before = serde_json::to_value(&a.session.doc).unwrap();
+        if fixed {
+            assert!(a.run("file.rename", json!({"name":"ephemeral name"})).is_err());
+            assert_eq!(a.session.path.as_deref(), Some(std::path::Path::new("native-version.json")));
+        }
+        let mut h = harness(a);
+        h.run_steps(6);
+        let title = h.query_all_by_label_contains("native-version").find(|n| n.rect().top() < 50.0).expect("title remains readable");
+        assert_eq!(title.accesskit_node().role(), if fixed { egui::accesskit::Role::Label } else { egui::accesskit::Role::Button });
+        title.click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), if fixed { None } else { Some("renameDocument") });
+        assert_eq!(serde_json::to_value(&h.state().session.doc).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_managed_customization_omits_unavailable_commands_and_respects_readonly_qat() {
+    use egui_kittest::kittest::Queryable;
+    for fixed in [false, true] {
+        let (mut a, _, requests) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.session.ribbon.qat = Some(vec!["file.new".into(), "file.save".into(), "file.rename".into(), "format.bold".into()]);
+        for id in ["file.new", "file.rename", "font.add", "references.researcher"] {
+            let rows = crate::dialogs_keyboard::matching_commands(&a, "", id);
+            assert_eq!(rows.iter().any(|(found, _)| found == id), !fixed, "customization search: {id}");
+            assert_eq!(crate::dialogs_keyboard::commands(&a, "File").iter().any(|(found, _)| *found == id), !fixed && id.starts_with("file."));
+        }
+        let stored = a.session.ribbon.qat.clone();
+        let id = a.session.document_id();
+        let mut h = harness(a);
+        h.run_steps(6);
+        assert_eq!(h.query_all_by_label_contains("New").filter(|n| n.rect().top() < 50.0).count() > 0, !fixed);
+        assert_eq!(h.state().session.ribbon.qat, stored, "rendering must not remove stored preferences");
+        h.get_by_label("Customize Quick Access Toolbar").click();
+        h.run_steps(3);
+        assert_eq!(h.query_all_by_label_contains("New").any(|n| n.rect().top() >= 50.0), !fixed);
+        assert!(h.query_all_by_label_contains("Open").any(|n| n.rect().top() >= 50.0));
+        if fixed {
+            h.state_mut().ui.keytips = crate::keytips::Phase::Tabs;
+            crate::keytips::handle_key(h.state_mut(), egui::Key::Num1);
+            assert_eq!(requests.borrow().len(), 1, "first visible QAT keytip still activates Save, not hidden New");
+            assert_eq!(h.state().session.document_id(), id);
+            h.key_press(egui::Key::Escape);
+            h.run_steps(3);
+            crate::dialogs_ribbon::open(h.state_mut(), crate::dialogs_ribbon::Page::QuickAccess);
+            h.run_steps(6);
+            h.get_by_label("Down").click();
+            h.run_steps(3);
+            assert_eq!(crate::chrome::visible_qat(h.state()), ["format.bold", "file.save"]);
+            let stored = h.state().session.ribbon.qat();
+            assert!(stored.contains(&"file.new") && stored.contains(&"file.rename"), "reordering keeps hidden preferences");
+            h.state_mut().run("select.all", json!({})).unwrap();
+            h.state_mut().session.set_host_read_only(true);
+            assert!(!crate::chrome::qat_enabled(h.state(), "file.save"));
+            assert!(!crate::chrome::qat_enabled(h.state(), "edit.undo"));
+            assert!(crate::chrome::qat_enabled(h.state(), "edit.copy"));
+        }
+    }
+}
+
+#[test]
+fn native_managed_same_frame_typing_before_control_s_reaches_the_saved_snapshot() {
+    same_frame_typing_save(false, false, false);
+}
+
+#[test]
+fn native_managed_same_frame_split_typing_before_control_s_reaches_the_saved_snapshot() {
+    same_frame_typing_save(true, false, false);
+}
+
+#[test]
+fn native_managed_same_frame_home_selection_text_save_preserves_order() {
+    same_frame_typing_save(false, true, false);
+}
+
+#[test]
+fn native_managed_same_frame_readonly_refuses_text_and_save() {
+    same_frame_typing_save(true, false, true);
+}
+
+fn same_frame_typing_save(split: bool, replace: bool, read_only: bool) {
+    use egui_kittest::kittest::Queryable;
+    let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<u8>>::new()));
+    let captured = saved.clone();
+    let saves = async_saves::AsyncSaves::default();
+    let tickets = saves.clone();
+    let services = Services {
+        host_document_fixed: true,
+        async_saves: Some(saves),
+        host_save_request: Some(Box::new(move |session, _| {
+            let bytes = wordcraft_engine::io::save_bytes("captured.json", &session.doc)?;
+            captured.borrow_mut().push(bytes);
+            Ok(tickets.start())
+        })),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    a.session.path = Some(std::path::PathBuf::from("native-version.json"));
+    let mut h = harness(a);
+    h.run_steps(6);
+    h.get_by_role(egui::accesskit::Role::Document).click();
+    h.run_steps(3);
+    h.input_mut().events = vec![egui::Event::ModifiersChanged(egui::Modifiers::default()), egui::Event::Text("P".into())];
+    h.step();
+    assert_eq!(body_text(h.state()), "P", "the active canvas accepted the first frame");
+    let control = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.state_mut().session.set_host_read_only(read_only);
+    // No redundant initial ModifiersChanged: the preceding frame ended without Ctrl.
+    let mut events = Vec::new();
+    if replace {
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        for (key, modifiers) in [(egui::Key::Home, control), (egui::Key::End, shift)] {
+            events.push(egui::Event::ModifiersChanged(modifiers));
+            events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        }
+        events.push(egui::Event::ModifiersChanged(egui::Modifiers::default()));
+    }
+    if split {
+        for ch in "avelMarker ".chars() {
+            events.push(egui::Event::Text(ch.to_string()));
+        }
+    } else {
+        events.push(egui::Event::Text("avelMarker ".into()));
+    }
+    events.push(egui::Event::ModifiersChanged(control));
+    events.push(egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: control });
+    // Harness::event/step processes each queued event in its own frame. RawInput is
+    // intentional here: all text and the later shortcut must share exactly ONE frame.
+    h.input_mut().events = events;
+    h.step();
+    if read_only {
+        assert_eq!(body_text(h.state()), "P");
+        assert!(saved.borrow().is_empty(), "read-only did not request a save");
+        return;
+    }
+    let expected = if replace { "avelMarker " } else { "PavelMarker " };
+    assert_eq!(body_text(h.state()), expected);
+    assert!(h.state().session.dirty, "a save intent is not a server ACK");
+    assert!(!saved.borrow().is_empty(), "real managed save callback ran (body={:?})", body_text(h.state()));
+    for bytes in saved.borrow().iter() {
+        let native: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(native["body"][0]["text"], expected, "same-frame managed save must include all prior text (split={split})");
+    }
+}
+
+#[test]
+fn native_canvas_refocus_uses_modifiers_observed_while_file_chrome_owned_the_frame() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default()));
+    h.run_steps(6);
+    h.get_by_role(egui::accesskit::Role::Document).click();
+    h.run_steps(3);
+    h.input_mut().events = vec![egui::Event::Text("P".into())];
+    h.step();
+    let control = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.state_mut().ui.backstage = true;
+    h.input_mut().events = vec![egui::Event::ModifiersChanged(control)];
+    h.step();
+    assert!(h.state().canvas.text_modifiers.ctrl, "File chrome observed held Ctrl without a canvas");
+    h.state_mut().ui.backstage = false;
+    h.input_mut().events.clear();
+    h.step();
+    // Node::click_modifiers releases modifiers after clicking. Send coherent pointer
+    // frames directly so Ctrl really remains held when the following Text arrives.
+    let pos = h.get_by_role(egui::accesskit::Role::Document).rect().center();
+    for pressed in [true, false] {
+        h.input_mut().events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: control },
+        ];
+        h.step();
+    }
+    assert!(h.state().canvas.focused, "real Document click restored focus");
+    h.input_mut().events = vec![egui::Event::Text("shortcut echo".into())];
+    h.step();
+    assert_eq!(body_text(h.state()), "P", "Ctrl held while canvas was absent still suppresses command echo");
+    // Ctrl-click can select the paragraph. Release Ctrl and collapse at End before typing.
+    h.input_mut().events = vec![
+        egui::Event::ModifiersChanged(egui::Modifiers::default()),
+        egui::Event::Key { key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() },
+        egui::Event::Text(" released".into()),
+    ];
+    h.step();
+    assert_eq!(body_text(h.state()), "P released");
+}

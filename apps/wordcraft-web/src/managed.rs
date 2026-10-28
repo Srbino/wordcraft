@@ -1,5 +1,9 @@
 //! Bounded native snapshot acknowledgements for opt-in host-managed saves.
 
+use std::collections::VecDeque;
+
+const MAX_AUTOMATIC_ALIASES: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotKey {
     pub request_id: String,
@@ -20,12 +24,12 @@ pub struct Completion {
     pub mark_saved: bool,
 }
 
-/// Keep one manual save independent of the latest automatic snapshot. A newer autosnapshot
-/// must not strand an older manual ticket or let its ACK mark newer edits saved.
+/// Keep a manual save independent of a bounded cohort of identical automatic snapshots.
+/// Any known cohort alias can settle that exact revision; newer edits still remain dirty.
 #[derive(Default)]
 pub struct ManagedSaves {
     manual: Option<ManualSave>,
-    latest: Option<SnapshotKey>,
+    automatic: VecDeque<SnapshotKey>,
 }
 
 impl ManagedSaves {
@@ -60,13 +64,21 @@ impl ManagedSaves {
         {
             manual.snapshot = Some(snapshot);
         } else {
-            self.latest = Some(snapshot);
+            if self.automatic.back().is_none_or(|old| old.document != snapshot.document || old.revision != snapshot.revision) {
+                self.automatic.clear();
+            }
+            if !self.automatic.contains(&snapshot) {
+                if self.automatic.len() >= MAX_AUTOMATIC_ALIASES {
+                    self.automatic.pop_front();
+                }
+                self.automatic.push_back(snapshot);
+            }
         }
         Ok(())
     }
 
     pub fn knows(&self, snapshot: &SnapshotKey) -> bool {
-        self.manual.as_ref().and_then(|m| m.snapshot.as_ref()) == Some(snapshot) || self.latest.as_ref() == Some(snapshot)
+        self.manual.as_ref().and_then(|m| m.snapshot.as_ref()) == Some(snapshot) || self.automatic.contains(snapshot)
     }
 
     pub fn knows_failure(&self, request_id: &str) -> bool {
@@ -76,8 +88,8 @@ impl ManagedSaves {
     pub fn acknowledge(&mut self, snapshot: &SnapshotKey, document: &str, revision: &str) -> Option<Completion> {
         let ticket = if self.manual.as_ref().and_then(|m| m.snapshot.as_ref()) == Some(snapshot) {
             self.manual.take().map(|m| m.ticket)
-        } else if self.latest.as_ref() == Some(snapshot) {
-            self.latest = None;
+        } else if self.automatic.contains(snapshot) {
+            self.automatic.clear();
             None
         } else {
             return None;
@@ -155,5 +167,61 @@ mod tests {
         assert_eq!(saves.acknowledge(&snapshot, "document", "r2"), Some(Completion { ticket: None, mark_saved: false }));
         saves.exported(snapshot.clone()).unwrap();
         assert_eq!(saves.acknowledge(&snapshot, "document", "r1"), Some(Completion { ticket: None, mark_saved: true }));
+    }
+    #[test]
+    fn identical_automatic_exports_keep_both_known_aliases_until_first_ack() {
+        let mut saves = ManagedSaves::default();
+        let a = key("auto-a", "r1");
+        let b = key("auto-b", "r1");
+        saves.exported(a.clone()).unwrap();
+        saves.exported(b.clone()).unwrap();
+        assert!(saves.knows(&a));
+        assert!(saves.knows(&b));
+        assert_eq!(saves.acknowledge(&key("unknown", "r1"), "document", "r1"), None);
+        assert_eq!(saves.acknowledge(&a, "document", "r1"), Some(Completion { ticket: None, mark_saved: true }));
+        assert_eq!(saves.acknowledge(&b, "document", "r1"), None);
+    }
+    #[test]
+    fn identical_automatic_alias_ack_cannot_clean_newer_edit_draft_or_document() {
+        for (document, revision) in [("document", "r2"), ("document", "r1:draft2"), ("other", "r1")] {
+            let mut saves = ManagedSaves::default();
+            let a = key("auto-a", "r1");
+            saves.exported(a.clone()).unwrap();
+            saves.exported(key("auto-b", "r1")).unwrap();
+            assert_eq!(saves.acknowledge(&a, document, revision), Some(Completion { ticket: None, mark_saved: false }));
+        }
+    }
+    #[test]
+    fn automatic_alias_cohort_is_bounded_and_changes_with_document_or_revision() {
+        let mut saves = ManagedSaves::default();
+        for i in 0..17 {
+            saves.exported(key(&format!("auto-{i}"), "r1")).unwrap();
+        }
+        assert!(!saves.knows(&key("auto-0", "r1")));
+        assert!(saves.knows(&key("auto-1", "r1")));
+        assert!(saves.knows(&key("auto-16", "r1")));
+        let fresh = key("fresh", "r2");
+        saves.exported(fresh.clone()).unwrap();
+        assert!(!saves.knows(&key("auto-16", "r1")));
+        assert!(saves.knows(&fresh));
+        let mut other = key("other-doc", "r2");
+        other.document = "replacement".into();
+        saves.exported(other.clone()).unwrap();
+        assert!(!saves.knows(&fresh));
+        assert!(saves.knows(&other));
+    }
+    #[test]
+    fn automatic_alias_ack_does_not_consume_a_manual_ticket() {
+        let mut saves = ManagedSaves::default();
+        let id = saves.start("document", 7).unwrap();
+        let manual = key(&id, "r1");
+        saves.exported(manual.clone()).unwrap();
+        let a = key("auto-a", "r1");
+        saves.exported(a.clone()).unwrap();
+        saves.exported(key("auto-b", "r1")).unwrap();
+        assert_eq!(saves.acknowledge(&a, "document", "r1"), Some(Completion { ticket: None, mark_saved: true }));
+        assert!(saves.pending());
+        assert_eq!(saves.acknowledge(&manual, "document", "r1"), Some(Completion { ticket: Some(7), mark_saved: true }));
+        assert!(!saves.pending());
     }
 }

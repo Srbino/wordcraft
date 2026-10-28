@@ -91,6 +91,10 @@ pub fn specs() -> Vec<CommandSpec> {
             .key("Mod+O / Mod+F12 / Mod+Alt+F2")
             .params(r#"{"path": string, "data"?: base64 (the file's bytes; `path` then only names it), "password"?: string (for a password-protected Word document)}"#)
             .pure(),
+        // Like a version restore, this whole-document edit owns its checkpoint and protection check.
+        CommandSpec::new("file.import", "Import into Current Document", "File › Open", import_document)
+            .params(r#"{"path": string (format name), "data": base64, "password"?: string} → replace the current document's contents without changing its identity; undoable"#)
+            .pure(),
         CommandSpec::new("file.save", "Save", "File", save)
             .key("Mod+S / Shift+F12 / Alt+Shift+F2")
             .params(r#"{"path"?: string, "password"?: string (encrypt this and later saves with it, as file.encrypt does), "markup"?: bool (Print Markup for a PDF, PNG, HTML, Markdown or text copy: comments shown; default file.printMarkup), "format"?: "wordml2003" (an .xml file as a Word 2003 XML Document) | "flatopc" (as a Word XML Document, the default; saving over a Word 2003 XML file keeps that format)}"#)
@@ -291,6 +295,39 @@ fn open(s: &mut Session, v: &Value) -> CmdResult {
     Ok(
         json!({"path": path, "paragraphs": s.doc.paragraph_count(), "words": s.doc.word_count(), "encrypted": encrypted, "alreadyOpen": false, "id": s.document_id()}),
     )
+}
+
+/// Import an entire file into the current host-owned document. Parsing completes before any
+/// edit, and the same whole-document protection rule as version restore applies. Opening a
+/// separate document remains `file.open`; imports keep identity, path, host access and history.
+fn import_document(s: &mut Session, v: &Value) -> CmdResult {
+    super::protect::check_version_restore(s)?;
+    let path = p::req_str(v, "path")?;
+    let data = p::req_str(v, "data")?;
+    let bytes = super::insert::base64_decode(data).ok_or_else(|| CmdError::Params("bad base64".into()))?;
+    let (doc, _) = crate::io::open_bytes_in(path, &bytes, p::str(v, "password"), &s.region()).map_err(CmdError::Failed)?;
+    s.checkpoint("Import Document");
+    s.doc = doc;
+    s.doc.ensure_nonempty();
+    s.note_body_replaced();
+    s.math = None;
+    s.sel = crate::Selection::caret(s.doc.start_of(StoryRef::Body));
+    s.pending = None;
+    s.pending_move = None;
+    s.autocap = None;
+    s.widened = None;
+    s.originals.clear();
+    s.picture_looks.clear();
+    s.view.outline.collapsed.clear();
+    s.hf_return = None;
+    s.new_header_parts.clear();
+    s.also_selected.clear();
+    s.column = None;
+    s.column_mode = false;
+    s.bib_style = crate::doc_state::doc_bib_style(&s.doc);
+    s.touch();
+    s.relayout();
+    Ok(json!({"imported": true, "id": s.document_id(), "paragraphs": s.doc.paragraph_count(), "words": s.doc.word_count()}))
 }
 
 /// Close a document with no window to ask about it (agents, headless sessions).
