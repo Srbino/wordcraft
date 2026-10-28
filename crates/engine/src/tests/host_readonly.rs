@@ -115,3 +115,19 @@ fn native_host_readonly_trusted_import_does_not_unlock_interactive_commands() {
     assert!(s.run("text.insert", &json!({"text":"still forbidden"})).is_err());
     assert_eq!(s.doc.settings.protection.as_deref(), Some("readOnly"));
 }
+
+#[test]
+fn native_host_readonly_refuses_a_full_document_import_before_any_state_change() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text":"retained host content"}));
+    let before = native(&s);
+    let id = s.document_id();
+    let revision = s.rev();
+    let imported = crate::io::save_bytes("picked.docx", &wordcraft_doc::Document::from_text("forbidden import")).unwrap();
+    s.set_host_read_only(true);
+    let error = s.run("file.import", &json!({"path":"picked.docx","data":crate::cmd::insert::base64_encode(&imported)})).unwrap_err().to_string();
+    assert!(error.contains("read-only"));
+    assert_eq!(s.document_id(), id);
+    assert_eq!(s.rev(), revision);
+    assert_eq!(native(&s), before);
+}

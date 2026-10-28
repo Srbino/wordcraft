@@ -7205,3 +7205,146 @@ fn native_host_readonly_bootstrap_import_keeps_guard_and_blocks_ui_authority() {
     assert_eq!(app.session.rev(), committed_revision);
     assert!(app.session.dirty, "read-only export is not a storage acknowledgement");
 }
+
+#[test]
+fn native_managed_inbox_docx_import_edits_the_bound_document() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.session.dirty = false; // The host has already durably opened this version.
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    let id = a.session.document_id();
+    let document = wordcraft_doc::Document::from_text("Managed DOCX import");
+    let bytes = wordcraft_engine::io::save_bytes("picked.docx", &document).unwrap();
+    inbox.lock().unwrap().push(("picked.docx".into(), bytes));
+    a.drain_inbox();
+    assert_eq!(a.session.document_id(), id);
+    assert!(a.session.dirty);
+    assert_eq!(body_text(&a), "Managed DOCX import");
+    a.run("edit.undo", json!({})).unwrap();
+    assert_ne!(body_text(&a), "Managed DOCX import");
+}
+
+#[test]
+fn native_managed_profile_hides_unroutable_pages_and_external_actions() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.backstage = true;
+    a.ui.backstage_page = "home".into();
+    let mut h = harness(a);
+    h.run_steps(5);
+    for label in ["Blank document", "New", "Close", "Recover", "Discord community"] {
+        assert!(h.query_by_label(label).is_none(), "{label} cannot run in a fixed host document");
+    }
+    assert!(h.query_all_by_label("Info").next().is_some());
+    h.state_mut().ui.backstage = false;
+    h.state_mut().ui.tab = "Help".into();
+    h.run_steps(5);
+    for label in ["Discord", "Zotero", "Community Discord", "Check for Updates…"] {
+        assert!(h.query_by_label(label).is_none(), "{label} needs unavailable external capabilities");
+    }
+}
+
+#[test]
+fn native_managed_print_pages_pdf_uses_the_download_hook_without_filesystem_or_save_ack() {
+    let (mut a, _, requests) = fixed_managed_host_app();
+    let files = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let capture = files.clone();
+    a.services.download = Some(Box::new(move |name, bytes| {
+        capture.borrow_mut().push((name.to_string(), bytes.to_vec()));
+        Ok(())
+    }));
+    let dir = scratch("native-managed-print-pdf");
+    let path = dir.join("print-copy.pdf");
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let dirty = a.session.dirty;
+    let result = a.run("file.printPdf", json!({"path":path.to_string_lossy(),"copies":2,"range":"all"})).unwrap();
+    assert_eq!(files.borrow().len(), 1);
+    assert!(files.borrow()[0].1.starts_with(b"%PDF-"));
+    assert!(!path.exists(), "web exports must not write a host filesystem path");
+    assert_eq!(result["downloaded"], path.to_string_lossy().as_ref());
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert_eq!(a.session.dirty, dirty);
+    assert!(requests.borrow().is_empty(), "printing a copy does not request a native server save");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn native_managed_profile_refuses_commands_that_switch_document_or_use_external_services() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    let original = a.session.document_id();
+    for command in [
+        "file.new",
+        "file.close",
+        "file.recover",
+        "view.newWindow",
+        "ui.newWindow",
+        "view.switchWindows",
+        "mailings.printDocuments",
+        "ui.discord",
+        "ui.checkForUpdates",
+    ] {
+        assert!(a.execute(command, json!({})).is_err(), "{command} must be routed through the host or hidden");
+        assert_eq!(a.session.document_id(), original);
+    }
+}
+
+#[test]
+fn native_managed_inbox_import_refuses_the_readonly_holder_without_changing_content() {
+    let (mut a, _, _) = fixed_managed_host_app();
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    let document = wordcraft_doc::Document::from_text("forbidden late import");
+    let bytes = wordcraft_engine::io::save_bytes("late.docx", &document).unwrap();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let id = a.session.document_id();
+    a.session.set_host_read_only(true);
+    inbox.lock().unwrap().push(("late.docx".into(), bytes));
+    a.drain_inbox();
+    assert_eq!(a.session.document_id(), id);
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+}
+
+fn fixed_managed_host_app() -> (WordApp, async_saves::AsyncSaves, std::rc::Rc<std::cell::RefCell<Vec<u64>>>) {
+    let (mut app, saves, requests) = managed_host_app();
+    app.services.host_document_fixed = true;
+    (app, saves, requests)
+}
+
+#[test]
+fn native_managed_dirty_docx_import_waits_for_old_snapshot_confirmation() {
+    let (mut a, saves, requests) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let document = a.session.document_id();
+    let imported = wordcraft_engine::io::save_bytes("picked.docx", &wordcraft_doc::Document::from_text("Imported after old save")).unwrap();
+    let params = json!({"path":"picked.docx","data":wordcraft_engine::cmd::insert::base64_encode(&imported)});
+    assert_eq!(a.run("file.open", params).unwrap()["pending"], "saveChanges");
+    assert_eq!(a.run("ui.saveChanges", json!({"answer":"save"})).unwrap()["pending"], "save");
+    assert_eq!(requests.borrow().len(), 1);
+    a.settle_async_saves();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before, "without an ACK the old contents stay installed");
+    assert_eq!(a.session.document_id(), document);
+    // The bridge only clears dirty after an exact current old-snapshot acknowledgement.
+    a.session.dirty = false;
+    saves.finish(requests.borrow()[0], async_saves::SaveOutcome::Saved);
+    a.settle_async_saves();
+    assert_eq!(a.session.document_id(), document);
+    assert_eq!(body_text(&a), "Imported after old save");
+    assert!(a.session.dirty, "the imported contents need their own server save");
+    assert_eq!(requests.borrow().len(), 1, "the old confirmation is not an imported-document save");
+}
+
+#[test]
+fn native_managed_failed_import_save_preserves_old_contents_and_allows_cancel() {
+    let (mut a, saves, requests) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    let imported = wordcraft_engine::io::save_bytes("picked.docx", &wordcraft_doc::Document::from_text("Do not install before save")).unwrap();
+    a.run("file.open", json!({"path":"picked.docx","data":wordcraft_engine::cmd::insert::base64_encode(&imported)})).unwrap();
+    a.run("ui.saveChanges", json!({"answer":"save"})).unwrap();
+    saves.finish(requests.borrow()[0], async_saves::SaveOutcome::Failed("server did not confirm".into()));
+    a.settle_async_saves();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert_eq!(prompt(&a), Some("saveChanges"));
+    a.run("ui.saveChanges", json!({"answer":"cancel"})).unwrap();
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    assert!(a.session.dirty);
+}

@@ -892,6 +892,7 @@ pub(super) fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             } else {
                 reg.all().iter().filter(|c| command_matches(c, query)).collect()
             };
+            hits.retain(|command| app.host_command_visible(command.id));
             hits.truncate(14);
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let mut run: Option<&str> = enter.then(|| hits.first().map(|c| c.id)).flatten();
