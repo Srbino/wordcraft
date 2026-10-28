@@ -378,13 +378,8 @@ pub(crate) fn layout_pass(
             mirror_even_pages(&mut pages, sections);
         }
     }
-    // Evict paragraph layouts that weren't used this pass if the cache grew large.
-    if ctx.cache.paras.len() + ctx.cache.measures.len() > 4 * ctx.cache.used.len().max(1024) {
-        let used = std::mem::take(&mut ctx.cache.used);
-        ctx.cache.paras.retain(|k, _| used.contains(k));
-        ctx.cache.measures.retain(|k, _| used.contains(k));
-        ctx.cache.used = used;
-    }
+    // A few obsolete long paragraphs can retain far more memory than thousands of short ones.
+    ctx.cache.prune_unused(64 * 1024 * 1024);
     let mut index: HashMap<(StoryRef, Path), Vec<(usize, usize)>> = HashMap::new();
     for (pi, p) in pages.iter().enumerate() {
         for (ii, it) in p.items.iter().enumerate() {
