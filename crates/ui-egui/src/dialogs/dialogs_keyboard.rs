@@ -48,6 +48,9 @@ pub(crate) fn categories(app: &WordApp) -> Vec<String> {
     let mut other: Vec<String> = Vec::new();
     let mut tabs: Vec<&str> = Vec::new();
     for spec in app.session.registry.all() {
+        if !app.host_command_visible(spec.id) {
+            continue;
+        }
         let tab = spec.location.split(" › ").next().unwrap_or("");
         if crate::ribbon::TABS.contains(&tab) {
             if !tabs.contains(&tab) {
@@ -68,6 +71,7 @@ pub(crate) fn commands(app: &WordApp, category: &str) -> Vec<(&'static str, Stri
         .registry
         .all()
         .iter()
+        .filter(|spec| app.host_command_visible(spec.id))
         .filter(|s| category == ALL || s.location.split(" › ").next() == Some(category))
         .map(|s| (s.id, tl!(s.label).to_string()))
         .collect();
@@ -89,6 +93,7 @@ pub(crate) fn matching_commands(app: &WordApp, category: &str, query: &str) -> V
         .registry
         .all()
         .iter()
+        .filter(|spec| app.host_command_visible(spec.id))
         .filter(|s| s.id.to_lowercase().contains(&q) || s.label.to_lowercase().contains(&q) || crate::i18n::lowercase(tl!(s.label)).contains(&q))
         .map(|s| (s.id.to_string(), tl!(s.label).to_string()))
         .collect();

@@ -662,7 +662,7 @@ pub(crate) fn qat_label(index: usize, count: usize) -> String {
 fn qat_key(app: &mut WordApp, name: &str) {
     app.ui.keytip_prefix.push_str(name);
     // A hidden toolbar has no badges, so a digit cancels the mode and runs nothing (#1945).
-    let ids = if app.ui.quick_access_toolbar { app.session.ribbon.qat() } else { Vec::new() };
+    let ids = if app.ui.quick_access_toolbar { crate::chrome::visible_qat(app) } else { Vec::new() };
     let mut hit = None;
     let mut pending = false;
     for (index, id) in ids.iter().enumerate() {

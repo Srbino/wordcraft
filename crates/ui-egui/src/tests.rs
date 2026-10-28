@@ -7492,3 +7492,72 @@ fn native_managed_external_about_references_are_readable_without_navigation_acti
         assert!(h.query_by_label("Models").is_some());
     }
 }
+
+#[test]
+fn native_managed_title_keeps_host_name_without_an_unpersisted_rename_action() {
+    use egui_kittest::kittest::{NodeT, Queryable};
+    for fixed in [false, true] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.session.path = Some(std::path::PathBuf::from("native-version.json"));
+        assert_eq!(a.host_command_visible("file.rename"), !fixed);
+        let before = serde_json::to_value(&a.session.doc).unwrap();
+        if fixed {
+            assert!(a.run("file.rename", json!({"name":"ephemeral name"})).is_err());
+            assert_eq!(a.session.path.as_deref(), Some(std::path::Path::new("native-version.json")));
+        }
+        let mut h = harness(a);
+        h.run_steps(6);
+        let title = h.query_all_by_label_contains("native-version").find(|n| n.rect().top() < 50.0).expect("title remains readable");
+        assert_eq!(title.accesskit_node().role(), if fixed { egui::accesskit::Role::Label } else { egui::accesskit::Role::Button });
+        title.click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), if fixed { None } else { Some("renameDocument") });
+        assert_eq!(serde_json::to_value(&h.state().session.doc).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_managed_customization_omits_unavailable_commands_and_respects_readonly_qat() {
+    use egui_kittest::kittest::Queryable;
+    for fixed in [false, true] {
+        let (mut a, _, requests) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        a.session.ribbon.qat = Some(vec!["file.new".into(), "file.save".into(), "file.rename".into(), "format.bold".into()]);
+        for id in ["file.new", "file.rename", "font.add", "references.researcher"] {
+            let rows = crate::dialogs_keyboard::matching_commands(&a, "", id);
+            assert_eq!(rows.iter().any(|(found, _)| found == id), !fixed, "customization search: {id}");
+            assert_eq!(crate::dialogs_keyboard::commands(&a, "File").iter().any(|(found, _)| *found == id), !fixed && id.starts_with("file."));
+        }
+        let stored = a.session.ribbon.qat.clone();
+        let id = a.session.document_id();
+        let mut h = harness(a);
+        h.run_steps(6);
+        assert_eq!(h.query_all_by_label_contains("New").filter(|n| n.rect().top() < 50.0).count() > 0, !fixed);
+        assert_eq!(h.state().session.ribbon.qat, stored, "rendering must not remove stored preferences");
+        h.get_by_label("Customize Quick Access Toolbar").click();
+        h.run_steps(3);
+        assert_eq!(h.query_all_by_label_contains("New").any(|n| n.rect().top() >= 50.0), !fixed);
+        assert!(h.query_all_by_label_contains("Open").any(|n| n.rect().top() >= 50.0));
+        if fixed {
+            h.state_mut().ui.keytips = crate::keytips::Phase::Tabs;
+            crate::keytips::handle_key(h.state_mut(), egui::Key::Num1);
+            assert_eq!(requests.borrow().len(), 1, "first visible QAT keytip still activates Save, not hidden New");
+            assert_eq!(h.state().session.document_id(), id);
+            h.key_press(egui::Key::Escape);
+            h.run_steps(3);
+            crate::dialogs_ribbon::open(h.state_mut(), crate::dialogs_ribbon::Page::QuickAccess);
+            h.run_steps(6);
+            h.get_by_label("Down").click();
+            h.run_steps(3);
+            assert_eq!(crate::chrome::visible_qat(h.state()), ["format.bold", "file.save"]);
+            let stored = h.state().session.ribbon.qat();
+            assert!(stored.contains(&"file.new") && stored.contains(&"file.rename"), "reordering keeps hidden preferences");
+            h.state_mut().run("select.all", json!({})).unwrap();
+            h.state_mut().session.set_host_read_only(true);
+            assert!(!crate::chrome::qat_enabled(h.state(), "file.save"));
+            assert!(!crate::chrome::qat_enabled(h.state(), "edit.undo"));
+            assert!(crate::chrome::qat_enabled(h.state(), "edit.copy"));
+        }
+    }
+}

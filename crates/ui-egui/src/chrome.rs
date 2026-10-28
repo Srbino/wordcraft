@@ -50,8 +50,28 @@ fn qat_button(ui: &mut Ui, app: &mut WordApp, icon: &str, tip: &str, id: &str, e
 const QAT_MENU: [&str; 10] =
     ["file.new", "file.open", "file.save", "file.print", "edit.undo", "edit.redo", "edit.repeat", "review.spelling", "view.readMode", "insert.table"];
 
+/// Commands this host can actually expose, without changing the user's stored toolbar.
+pub(crate) fn visible_qat(app: &WordApp) -> Vec<&str> {
+    app.session.ribbon.qat().into_iter().filter(|id| app.host_command_visible(id)).collect()
+}
+
+/// Move to the adjacent visible command even when hidden entries remain in stored preferences.
+pub(crate) fn qat_move_delta(app: &WordApp, id: &str, by: i64) -> Option<i64> {
+    let visible = visible_qat(app);
+    let from = visible.iter().position(|item| *item == id)?;
+    let next = from.checked_add_signed(isize::try_from(by).ok()?)?;
+    let target = visible.get(next)?;
+    let stored = app.session.ribbon.qat();
+    let from = stored.iter().position(|item| *item == id)?;
+    let to = stored.iter().position(|item| item == target)?;
+    i64::try_from(to).ok()?.checked_sub(i64::try_from(from).ok()?)
+}
+
 /// Match the toolbar's enabled state for keyboard activation too.
 pub(crate) fn qat_enabled(app: &WordApp, id: &str) -> bool {
+    if !app.host_command_allowed(id) {
+        return false;
+    }
     match id {
         "edit.undo" => app.session.can_undo(),
         "edit.redo" => app.session.can_redo(),
@@ -63,7 +83,7 @@ pub(crate) fn qat_enabled(app: &WordApp, id: &str) -> bool {
 /// The Quick Access Toolbar (#379): the user's commands (Save, Undo, Redo until customized), each
 /// with a right-click menu, then the menu button that customizes it (#376).
 fn quick_access(ui: &mut Ui, app: &mut WordApp) {
-    let ids: Vec<String> = app.session.ribbon.qat().into_iter().map(str::to_string).collect();
+    let ids: Vec<String> = visible_qat(app).into_iter().map(str::to_string).collect();
     for (index, id) in ids.iter().enumerate() {
         let id = id.as_str();
         let tip = match id {
@@ -211,6 +231,9 @@ pub(crate) fn qat_menu(ui: &mut Ui, app: &mut WordApp) {
     ui.label(egui::RichText::new(tl!("Customize Quick Access Toolbar")).font(semibold(12.0)));
     ui.separator();
     for id in QAT_MENU {
+        if !app.host_command_visible(id) {
+            continue;
+        }
         let Some(label) = app.session.registry.get(id).map(|s| tl!(s.label).to_string()) else { continue };
         let on = app.session.ribbon.qat().contains(&id);
         let mark = egui::RichText::new("✓");
@@ -411,9 +434,10 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
             let w = text_width(ui.painter(), &shown, &font, track, t.text);
             if available > 24.0 {
                 let rect = Rect::from_center_size(pos2(cx, full.center().y), vec2(w + 8.0, control_h));
-                let response = ui.interact(rect, ui.scope_id().with("document_name"), Sense::click()).on_hover_text(tl!("Rename Document"));
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &title));
-                if response.clicked() {
+                let can_rename = app.host_command_visible("file.rename");
+                let response = ui.interact(rect, ui.scope_id().with("document_name"), if can_rename { Sense::click() } else { Sense::hover() });
+                response.widget_info(|| egui::WidgetInfo::labeled(if can_rename { egui::Role::Button } else { egui::Role::Label }, true, &title));
+                if can_rename && response.on_hover_text(tl!("Rename Document")).clicked() {
                     let _ = app.run("file.rename", json!({}));
                 }
 

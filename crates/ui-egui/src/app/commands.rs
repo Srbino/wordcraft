@@ -147,6 +147,7 @@ impl WordApp {
                 | "file.autosave"
                 | "file.saveTemplate"
                 | "file.encrypt"
+                | "file.rename"
                 | "references.researcher"
                 | "design.setDefault"
                 | "font.add"
