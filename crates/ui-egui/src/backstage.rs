@@ -522,6 +522,9 @@ fn personal_error_id() -> egui::Id {
 /// Draws the Recent documents list, distinguishes duplicate names by path for screen readers, and
 /// stores an open failure in this page's temporary state.
 fn open_list(app: &mut WordApp, ui: &mut Ui) {
+    if app.managed_document() {
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(tl!("Recent")).font(semibold(16.0)));
     ui.add_space(6.0);
@@ -677,24 +680,27 @@ fn info_page(app: &mut WordApp, ui: &mut Ui) {
         {
             let _ = app.run("ui.dialog", json!({"name": "customProperties"}));
         }
-        // Protect Document › Encrypt with Password (#55).
-        ui.add_space(18.0);
-        ui.label(egui::RichText::new(tl!("Protect Document")).font(semibold(15.0)));
-        let encrypted = info.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
-        ui.label(if encrypted {
-            tl!("A password is required to open this document.")
-        } else {
-            tl!("Anyone can open this document. Encrypt it with a password to keep it private.")
-        });
-        ui.horizontal(|ui| {
-            let label = if encrypted { tl!("Change Password…") } else { tl!("Encrypt with Password…") };
-            if ui.button(egui::RichText::new(label).font(medium(13.5))).clicked() {
-                let _ = app.run("file.encrypt", json!({}));
-            }
-            if encrypted && ui.button(egui::RichText::new(tl!("Remove Password")).font(medium(13.5))).clicked() {
-                let _ = app.run("file.encrypt", json!({"password": null}));
-            }
-        });
+        // DOCX file passwords are not protection for the host's native JSON snapshots.
+        if !app.managed_document() {
+            // Protect Document › Encrypt with Password (#55).
+            ui.add_space(18.0);
+            ui.label(egui::RichText::new(tl!("Protect Document")).font(semibold(15.0)));
+            let encrypted = info.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            ui.label(if encrypted {
+                tl!("A password is required to open this document.")
+            } else {
+                tl!("Anyone can open this document. Encrypt it with a password to keep it private.")
+            });
+            ui.horizontal(|ui| {
+                let label = if encrypted { tl!("Change Password…") } else { tl!("Encrypt with Password…") };
+                if ui.button(egui::RichText::new(label).font(medium(13.5))).clicked() {
+                    let _ = app.run("file.encrypt", json!({}));
+                }
+                if encrypted && ui.button(egui::RichText::new(tl!("Remove Password")).font(medium(13.5))).clicked() {
+                    let _ = app.run("file.encrypt", json!({"password": null}));
+                }
+            });
+        }
         let ui = &mut cols[1];
         ui.label(egui::RichText::new(tl!("Statistics")).font(semibold(15.0)));
         for (l, k) in [("Pages", "pages"), ("Words", "words"), ("Paragraphs", "paragraphs"), ("Sections", "sections"), ("Comments", "comments")] {

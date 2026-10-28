@@ -1220,3 +1220,40 @@ fn typing_with_smart_art_selected_types_into_an_item() {
     let g = wordcraft_engine::cmd::smart_art::selected_smart_art(&a.session).expect("still there");
     assert_eq!(g.items[0].text, "Ada", "one undo step for the typing");
 }
+
+fn native_managed_paste_app() -> WordApp {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("stale internal copy")), crate::Services::default());
+    a.services.host_document_fixed = true;
+    a.run("select.all", json!({})).unwrap();
+    a.run("edit.copy", json!({})).unwrap();
+    a.run("document.setText", json!({"text":""})).unwrap();
+    a
+}
+
+#[test]
+fn native_managed_paste_does_not_insert_internal_copy_before_same_frame_user_event() {
+    let mut a = native_managed_paste_app();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    mods_frame(
+        &egui::Context::default(),
+        &mut a,
+        ctrl,
+        vec![key_event(Key::V, true, ctrl), egui::Event::Paste("external user paste".into()), key_event(Key::V, false, ctrl)],
+    );
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "external user paste");
+}
+
+#[test]
+fn native_managed_paste_waits_for_a_later_user_event_and_keeps_readonly_authority() {
+    let mut a = native_managed_paste_app();
+    let ctx = egui::Context::default();
+    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+    mods_frame(&ctx, &mut a, ctrl, vec![key_event(Key::V, true, ctrl)]);
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "", "the raw shortcut must not paste the stale internal copy");
+    mods_frame(&ctx, &mut a, ctrl, vec![egui::Event::Paste("external user paste".into()), key_event(Key::V, false, ctrl)]);
+    assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "external user paste");
+    a.session.set_host_read_only(true);
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    mods_frame(&ctx, &mut a, ctrl, vec![key_event(Key::V, true, ctrl), egui::Event::Paste("forbidden".into()), key_event(Key::V, false, ctrl)]);
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+}

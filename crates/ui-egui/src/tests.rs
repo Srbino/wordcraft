@@ -7348,3 +7348,78 @@ fn native_managed_failed_import_save_preserves_old_contents_and_allows_cancel() 
     assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
     assert!(a.session.dirty);
 }
+
+#[test]
+fn native_managed_paste_controls_are_hidden_without_blocking_user_payloads() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.tab = "Home".into();
+    for id in ["edit.paste", "edit.pasteText", "edit.pasteMerge", "edit.pasteSpecial"] {
+        assert!(!a.host_command_visible(id), "{id} cannot read the current OS clipboard in the opaque host");
+    }
+    let mut h = harness(a);
+    h.run_steps(5);
+    for label in ["Paste", "Paste (⌘V)", "Paste (Ctrl+V)"] {
+        assert!(h.query_by_label(label).is_none(), "{label}");
+    }
+    assert!(h.query_by_label("Copy").is_some());
+    h.state_mut().run("edit.paste", json!({"text":"user-approved payload"})).unwrap();
+    assert!(body_text(h.state()).contains("user-approved payload"));
+    h.state_mut().session.set_host_read_only(true);
+    let before = serde_json::to_value(&h.state().session.doc).unwrap();
+    assert!(h.state_mut().run("edit.paste", json!({"text":"forbidden payload"})).is_err());
+    assert_eq!(serde_json::to_value(&h.state().session.doc).unwrap(), before);
+}
+
+#[test]
+fn native_managed_recent_paths_are_hidden_but_the_file_picker_remains_visible() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    a.ui.backstage = true;
+    a.ui.backstage_page = "open".into();
+    a.ui.recent = vec!["native-version.json".into()];
+    let mut h = harness(a);
+    h.run_steps(5);
+    assert!(h.query_by_label("Browse…").is_some());
+    assert!(
+        h.query_by_label("native-version.json").is_none(),
+        "the opaque editor cannot reopen a parent-owned native version from a filesystem path"
+    );
+}
+
+#[test]
+fn native_managed_info_does_not_offer_docx_file_password_as_native_protection() {
+    use egui_kittest::kittest::Queryable;
+    let (mut a, _, _) = fixed_managed_host_app();
+    let before = serde_json::to_value(&a.session.doc).unwrap();
+    assert!(
+        a.run("file.encrypt", json!({"password":"test-only"})).is_err(),
+        "a DOCX file password is Session state, not part of the native snapshot the host stores"
+    );
+    assert!(a.session.password.is_none());
+    assert_eq!(serde_json::to_value(&a.session.doc).unwrap(), before);
+    a.ui.backstage = true;
+    a.ui.backstage_page = "info".into();
+    let mut h = harness(a);
+    h.run_steps(5);
+    assert!(h.query_by_label("Encrypt with Password…").is_none());
+    assert!(h.query_by_label("Advanced Properties…").is_some());
+}
+
+#[test]
+fn native_managed_markdown_exports_hide_unbundled_media_but_keep_text_only_copies() {
+    use egui_kittest::kittest::Queryable;
+    for (fixed, picture, visible) in [(true, false, true), (true, true, false), (false, true, true)] {
+        let (mut a, _, _) = fixed_managed_host_app();
+        a.services.host_document_fixed = fixed;
+        if picture {
+            a.run("insert.picture", json!({"data":"iVBORw0KGgoAAAANSUhEUgAAACAAAAAQCAYAAAB3AH1ZAAAAKElEQVR4nGMQibrznxJ8R0ODIsww6oBRB4w6YNQBow4YdcCoAwbaAQCfenQ9EOdSfAAAAABJRU5ErkJggg=="})).unwrap();
+        }
+        a.ui.backstage = true;
+        a.ui.backstage_page = "export".into();
+        let mut h = harness(a);
+        h.run_steps(5);
+        assert_eq!(h.query_by_label("Markdown (*.md)").is_some(), visible, "managed={fixed}, picture={picture}");
+        assert!(h.query_by_label("Word document (*.docx)").is_some());
+    }
+}

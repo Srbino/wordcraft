@@ -127,6 +127,12 @@ pub(super) fn dispatch(app: &mut WordApp, key: Key, m: Modifiers) -> bool {
         return true;
     }
     if let Some(spec) = bound {
+        // Chromium delivers the raw shortcut and a separate user-approved Paste event.
+        // The managed opaque host cannot read the OS clipboard here; running the bare
+        // command would paste its stale internal copy before the real payload arrives.
+        if app.managed_document() && crate::system_clipboard::is_paste(spec.id) {
+            return true;
+        }
         // Option+Shift+- types an em dash on macOS; Word's Alt+Shift+- (Collapse) only works in
         // Outline view, so elsewhere the key stays typing (#1933).
         if m.alt && !crate::widgets::enabled(app, spec.id) {

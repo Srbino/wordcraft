@@ -129,6 +129,11 @@ impl WordApp {
         if !self.managed_document() || id.is_empty() {
             return true;
         }
+        // The opaque host cannot read the current OS clipboard for a menu/button action.
+        // User paste events carry their own payload and keep using these engine commands.
+        if crate::system_clipboard::is_paste(id) {
+            return false;
+        }
         if id.starts_with("ui.zotero.") || (!id.starts_with("ui.") && self.session.registry.get(id).is_none()) {
             return false;
         }
@@ -141,6 +146,7 @@ impl WordApp {
                 | "file.recover"
                 | "file.autosave"
                 | "file.saveTemplate"
+                | "file.encrypt"
                 | "ui.saveAsTemplate"
                 | "view.newWindow"
                 | "ui.newWindow"
@@ -165,7 +171,7 @@ impl WordApp {
     }
 
     pub(crate) fn host_command_allowed(&self, id: &str) -> bool {
-        if !self.host_command_visible(id) {
+        if !self.host_command_routable(id) {
             return false;
         }
         let view_ui = matches!(
@@ -186,10 +192,14 @@ impl WordApp {
     }
 
     fn check_host_access(&self, id: &str) -> Result<(), String> {
-        if !self.host_command_visible(id) {
+        if !self.host_command_routable(id) {
             return Err("this command is managed by the embedding host and is not available inside this document".into());
         }
         if self.host_command_allowed(id) { Ok(()) } else { Err("the host has made this document read-only".into()) }
+    }
+
+    fn host_command_routable(&self, id: &str) -> bool {
+        self.host_command_visible(id) || (self.managed_document() && crate::system_clipboard::is_paste(id))
     }
 
     fn execute_inner(&mut self, id: &str, params: Value, host_import: bool) -> Result<Value, String> {
