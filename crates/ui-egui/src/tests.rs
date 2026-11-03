@@ -3553,6 +3553,93 @@ fn clicks_on_ribbon_and_status_bar_chrome_keep_typing_in_the_document() {
     assert_eq!(body_text(h.state()), before, "typing went into the font size box, not the page");
 }
 
+/// A full window on a typed document, with the page focused.
+fn focused_window() -> egui_kittest::Harness<'static, WordApp> {
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        typed(),
+    );
+    for _ in 0..6 {
+        h.step();
+    }
+    h
+}
+
+/// Insert tab, the Table menu, a click on the 2x2 square of its grid, as a person does it.
+fn insert_2x2_from_the_ribbon(h: &mut egui_kittest::Harness<'_, WordApp>) {
+    use egui::accesskit::Role;
+    h.get_by_role_and_label(Role::Button, "Insert").click();
+    type_after_click(h, "Insert tab", " insert");
+    h.get_by_role_and_label(Role::Button, "Add a Table").click();
+    h.step();
+    h.step();
+    assert!(egui::Popup::is_any_open(&h.ctx), "the Table menu opened");
+    // The grid's squares sit under the "Insert Table" label; the label names the hovered size
+    // ("{cols}×{rows} Table"). Walk down the first column to the second row, then right to the
+    // second column, so the test follows the menu's own spacing.
+    let top = h.get_by_label("Insert Table").rect();
+    let hover = |h: &mut egui_kittest::Harness<'_, WordApp>, p: egui::Pos2, want: &str| {
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+        h.query_by_label(want).is_some()
+    };
+    let x0 = top.left() + 8.0;
+    let y = (0..120).map(|d| top.bottom() + d as f32).find(|&y| hover(h, egui::pos2(x0, y), "1×2 Table")).expect("the grid's second row") + 4.0;
+    let x = (0..160).map(|d| x0 + d as f32).find(|&x| hover(h, egui::pos2(x, y), "2×2 Table")).expect("the grid's second column") + 4.0;
+    let at = egui::pos2(x, y);
+    assert!(hover(h, at, "2×2 Table"), "the pointer is on the 2x2 square");
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.step();
+    h.step();
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the click closed the Table menu");
+    let size = h.state().session.doc.body.iter().find_map(|b| b.as_table()).map(|t| (t.rows.len(), t.cols()));
+    assert_eq!(size, Some((2, 2)), "the click inserted a 2x2 table");
+}
+
+/// The text of the first cell of the document's first table.
+fn first_cell_text(a: &WordApp) -> String {
+    let table = a.session.doc.body.iter().find_map(|b| b.as_table()).expect("the table");
+    table.rows[0].cells[0].blocks.iter().find_map(|b| b.as_para()).map(|p| p.plain_text()).unwrap_or_default()
+}
+
+/// Insert › Table's grid, as a person uses it: Insert tab, the Table menu, a click on the 2x2
+/// square, then typing. The grid's click lands on a popup, where the chrome refocus leaves focus
+/// alone, so the grid has to hand the keyboard back to the page itself, as the menu items do
+/// (`run_from_ribbon`). Before, the table was inserted and the next keystrokes went nowhere until
+/// the page was clicked (crewship #4877).
+#[test]
+fn typing_after_the_table_grid_lands_in_the_first_cell() {
+    let mut h = focused_window();
+    insert_2x2_from_the_ribbon(&mut h);
+    h.event(egui::Event::Text("CELL".into()));
+    h.step();
+    assert!(h.state().canvas.focused, "the page has keyboard focus after the insert");
+    assert_eq!(first_cell_text(h.state()), "CELL", "typing right after the insert lands in the first cell");
+}
+
+/// The caret the insert leaves is in the first cell: a click on ribbon chrome afterwards (the
+/// Insert tab) gives the keyboard back without moving it, so typing lands in that cell. The
+/// Crewship hour harness relies on this instead of clicking a point of the page.
+#[test]
+fn a_ribbon_tab_click_after_the_table_grid_types_into_the_first_cell() {
+    let mut h = focused_window();
+    insert_2x2_from_the_ribbon(&mut h);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Insert").click();
+    h.step();
+    h.step();
+    h.event(egui::Event::Text("CELL".into()));
+    h.step();
+    assert!(h.state().canvas.focused, "the tab click gave the page the keyboard");
+    assert_eq!(first_cell_text(h.state()), "CELL", "the caret stayed in the first cell");
+}
+
 /// #2068: fonts applied from the font box or the mini toolbar (`format.font`) and from the
 /// Font dialog (`format.set`) join Recently Used Fonts, most recent first, once each, ten at
 /// most; the list is kept in `ui.json` and read back tidied.
