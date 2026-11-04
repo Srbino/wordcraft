@@ -346,7 +346,10 @@ pub fn table_grid_picker(ui: &mut Ui, app: &mut WordApp) {
         ui.ctx().request_repaint();
     }
     if let Some((r, c)) = clicked {
-        let _ = app.run("insert.table", json!({"rows": r, "cols": c}));
+        // As the menu's items do: the click lands on a popup, where the chrome refocus leaves
+        // focus alone, so the page takes the keyboard back here, with the caret in the new
+        // table's first cell (crewship #4877).
+        crate::widgets::run_from_ribbon(app, "insert.table", json!({"rows": r, "cols": c}));
         ui.close();
     } else if new_hover.0 > 0 {
         // Word's Live Preview: the page shows the hovered table until a square is clicked.
